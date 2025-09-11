@@ -106,7 +106,7 @@ By default, the frontend expects the backend at http://localhost:8000. To change
 
 Example: frontend/.env
 ```
-VITE_API_BASE=http://127.0.0.1:8000
+VITE_API_BASE=https://museum-anomaly-detection-backend.onrender.com/
 ```
 
 ## Data Flow

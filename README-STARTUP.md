@@ -28,7 +28,7 @@
 
 ### 3. Access the Application
 - **Frontend (Dashboard)**: http://localhost:5173 (or the port shown in terminal)
-- **Backend API**: http://127.0.0.1:8000
+- **Backend API**:(https://museum-anomaly-detection-backend.onrender.com/)
 - **API Documentation**: http://127.0.0.1:8000/docs
 
 ## 📋 Server Status Check

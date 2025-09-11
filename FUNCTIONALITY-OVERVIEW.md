@@ -218,7 +218,6 @@ Your Museum Anomaly Detection Dashboard is a full-stack web application with:
 
 1. **Start Backend**: Run `uvicorn main:app --reload --host 127.0.0.1 --port 8000` in backend folder
 2. **Start Frontend**: Run `npm run dev` in frontend folder  
-3. **Access Dashboard**: Open browser to `http://localhost:5173`
-4. **API Documentation**: Visit `http://127.0.0.1:8000/docs`
+3. **Access Dashboard**: Open browser to `https://museum-anomaly-detection.vercel.app/`
 
 Your Museum Anomaly Detection Dashboard is **fully functional** with professional-grade features, comprehensive UI, and production-ready architecture! 🎉
