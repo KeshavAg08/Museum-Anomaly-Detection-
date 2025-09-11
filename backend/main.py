@@ -194,7 +194,7 @@ async def proxy_mjpeg_stream() -> AsyncGenerator[bytes, None]:
             await asyncio.sleep(0.5)
 
 # ---------------------- ROUTES ----------------------
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "Backend is running", "message": "Welcome to the Museum Anomaly Dashboard API"}
 
