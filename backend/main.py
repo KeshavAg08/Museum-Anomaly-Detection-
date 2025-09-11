@@ -217,12 +217,23 @@ async def camera_stream():
 async def chat_with_llama(req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Please provide a question.")
+
     messages = [
         {"role": "system", "content": "You are a helpful AI assistant for museum operations."},
         {"role": "user", "content": req.question}
     ]
-    reply = await call_openrouter_llama(messages) or await call_openai(messages)
-    return {"reply": reply or "AI temporarily unavailable"}
+
+    try:
+        reply = await call_openrouter_llama(messages)
+        if reply:
+            return {"reply": reply}
+        else:
+            print("OpenRouter returned None")
+            return {"reply": "AI temporarily unavailable"}
+    except Exception as e:
+        print(f"OpenRouter exception: {e}")
+        return {"reply": "AI temporarily unavailable"}
+
 
 @app.post("/anomaly/check")
 async def check_anomaly_with_llama(req: AnomalyRequest):
