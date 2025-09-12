@@ -18,7 +18,6 @@ from ultralytics import YOLO
 load_dotenv()
 
 # Environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 ESP32_CAM_URL = os.getenv("ESP32_CAM_URL")
 MOCK_SENSORS = os.getenv("MOCK_SENSORS", "true").lower() == "true"

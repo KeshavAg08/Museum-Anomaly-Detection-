@@ -1,10 +1,11 @@
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'https://museum-anomaly-detection-backend.onrender.com/'
+// Normalize base URL to avoid double slashes when joining with paths
+const API_BASE = (import.meta.env.VITE_API_BASE || 'https://museum-anomaly-detection-backend.onrender.com').replace(/\/+$/, '')
 
 export const api = axios.create({
   baseURL: API_BASE,
-  timeout: 10000,
+  timeout: 45000,
 })
 
 export async function fetchSensors() {
