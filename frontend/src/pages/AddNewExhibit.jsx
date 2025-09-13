@@ -11,13 +11,23 @@ const AddNewExhibit = () => {
     category: 'Interactive Technology',
     location: '',
     status: 'Active',
-    maintenance: 'Monthly'
+    maintenance: 'Monthly',
+    description: '',
+    temperature_min: 18.0,
+    temperature_max: 24.0,
+    humidity_min: 40.0,
+    humidity_max: 60.0,
+    vibration_max: 0.5
   })
   const [photo, setPhoto] = useState(null)
   const [isSaving, setIsSaving] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisResult, setAnalysisResult] = useState(null)
   const [recommendedSensors, setRecommendedSensors] = useState([])
+  const [error, setError] = useState(null)
+
+  // API Base URL to match backend
+  const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
   // Exhibit categories
   const exhibitCategories = [
@@ -51,6 +61,63 @@ const AddNewExhibit = () => {
     { id: 'magnetic', name: 'Magnetic/Reed Switch', icon: '🧲' },
     { id: 'strain', name: 'Strain Gauge', icon: '⚖️' }
   ]
+
+  // API call helper function
+  const apiCall = async (url, options = {}) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${url}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+        ...options,
+      })
+
+      if (!response.ok) {
+        const errorData = await response.text()
+        throw new Error(`HTTP ${response.status}: ${errorData || 'Request failed'}`)
+      }
+
+      const contentType = response.headers.get('content-type')
+      if (contentType && contentType.includes('application/json')) {
+        return await response.json()
+      }
+      return await response.text()
+    } catch (error) {
+      console.error('API call failed:', error)
+      throw error
+    }
+  }
+
+  // Create new exhibit function
+  const createExhibit = async (exhibitData) => {
+    try {
+      console.log('Creating exhibit:', exhibitData)
+      
+      // Transform frontend data to backend format
+      const backendData = {
+        name: exhibitData.name,
+        description: exhibitData.description || '',
+        location: exhibitData.location,
+        temperature_min: parseFloat(exhibitData.temperature_min) || 18.0,
+        temperature_max: parseFloat(exhibitData.temperature_max) || 24.0,
+        humidity_min: parseFloat(exhibitData.humidity_min) || 40.0,
+        humidity_max: parseFloat(exhibitData.humidity_max) || 60.0,
+        vibration_max: parseFloat(exhibitData.vibration_max) || 0.5
+      }
+      
+      const response = await apiCall('/exhibits', {
+        method: 'POST',
+        body: JSON.stringify(backendData),
+      })
+      
+      console.log('Exhibit created successfully:', response)
+      return response
+    } catch (error) {
+      console.error('Error creating exhibit:', error)
+      throw error
+    }
+  }
 
   const handleChange = (e) => {
     const { name, value } = e.target
@@ -91,21 +158,46 @@ const AddNewExhibit = () => {
       setForm(prev => ({
         ...prev,
         category: mockAnalysis.category,
-        maintenance: mockAnalysis.maintenanceSchedule
+        maintenance: mockAnalysis.maintenanceSchedule,
+        description: mockAnalysis.specialNotes
       }))
       
     } catch (error) {
       console.error('Analysis failed:', error)
+      setError('AI analysis failed. Please try again.')
     } finally {
       setIsAnalyzing(false)
     }
   }
 
   const handleSubmit = async () => {
-    if (!form.name || !form.id || !photo) return
+    // Validation
+    if (!form.name || !form.location || !photo) {
+      setError('Please fill in all required fields and upload a photo.')
+      return
+    }
+
     setIsSaving(true)
-    await new Promise(r => setTimeout(r, 1500))
-    navigate('/exhibit-management')
+    setError(null)
+    
+    try {
+      // Create the exhibit via API
+      const result = await createExhibit(form)
+      
+      console.log('Exhibit created:', result)
+      
+      // Show success message
+      alert(`Successfully added exhibit "${form.name}"!`)
+      
+      // Navigate back to management page
+      navigate('/exhibit-management')
+      
+    } catch (error) {
+      console.error('Failed to create exhibit:', error)
+      setError(`Failed to create exhibit: ${error.message}`)
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   return (
@@ -129,11 +221,27 @@ const AddNewExhibit = () => {
                 iconName="ArrowLeft"
                 iconPosition="left"
                 onClick={() => navigate('/exhibit-management')}
+                disabled={isSaving}
               >
                 Back to Management
               </Button>
             </div>
           </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <div className="flex">
+                <svg className="w-5 h-5 text-red-600 mr-2 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                <div className="text-sm text-red-800">
+                  <p className="font-medium">Error</p>
+                  <p>{error}</p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Form */}
           <div className="space-y-6">
@@ -141,48 +249,149 @@ const AddNewExhibit = () => {
               <h3 className="text-lg font-semibold text-text-primary mb-4">Exhibit Details</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-text-secondary mb-1">Exhibit Name</label>
-                  <input name="name" value={form.name} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2" placeholder="Holographic Projector" />
+                  <label className="block text-sm font-medium text-text-secondary mb-1">
+                    Exhibit Name *
+                  </label>
+                  <input 
+                    name="name" 
+                    value={form.name} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent" 
+                    placeholder="Holographic Projector"
+                    disabled={isSaving}
+                    required
+                  />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-text-secondary mb-1">Exhibit ID</label>
-                  <input name="id" value={form.id} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2" placeholder="EXH-009" />
+                  <label className="block text-sm font-medium text-text-secondary mb-1">
+                    Location *
+                  </label>
+                  <input 
+                    name="location" 
+                    value={form.location} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent" 
+                    placeholder="Robotics Hall - Section B"
+                    disabled={isSaving}
+                    required
+                  />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-text-secondary mb-1">Category</label>
-                  <select name="category" value={form.category} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2">
+                  <select 
+                    name="category" 
+                    value={form.category} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  >
                     {exhibitCategories.map(category => (
                       <option key={category} value={category}>{category}</option>
                     ))}
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-text-secondary mb-1">Location</label>
-                  <input name="location" value={form.location} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2" placeholder="Robotics Hall - Section B" />
-                </div>
-                <div>
                   <label className="block text-sm font-medium text-text-secondary mb-1">Status</label>
-                  <select name="status" value={form.status} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2">
+                  <select 
+                    name="status" 
+                    value={form.status} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  >
                     <option>Active</option>
                     <option>Maintenance</option>
                     <option>Inactive</option>
                   </select>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-text-secondary mb-1">Maintenance Schedule</label>
-                  <select name="maintenance" value={form.maintenance} onChange={handleChange} className="w-full border border-border rounded-md px-3 py-2">
-                    <option>Daily</option>
-                    <option>Weekly</option>
-                    <option>Bi-weekly</option>
-                    <option>Monthly</option>
-                  </select>
+                <div className="sm:col-span-2">
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Description</label>
+                  <textarea
+                    name="description"
+                    value={form.description}
+                    onChange={handleChange}
+                    rows={3}
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    placeholder="Brief description of the exhibit..."
+                    disabled={isSaving}
+                  />
                 </div>
               </div>
             </div>
 
+            {/* Environmental Thresholds */}
+            <div className="bg-card rounded-lg border border-border p-6 shadow-card">
+              <h3 className="text-lg font-semibold text-text-primary mb-4">Environmental Monitoring Thresholds</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Min Temperature (°C)</label>
+                  <input 
+                    name="temperature_min" 
+                    type="number" 
+                    step="0.1"
+                    value={form.temperature_min} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Max Temperature (°C)</label>
+                  <input 
+                    name="temperature_max" 
+                    type="number" 
+                    step="0.1"
+                    value={form.temperature_max} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Min Humidity (%)</label>
+                  <input 
+                    name="humidity_min" 
+                    type="number" 
+                    step="0.1"
+                    value={form.humidity_min} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Max Humidity (%)</label>
+                  <input 
+                    name="humidity_max" 
+                    type="number" 
+                    step="0.1"
+                    value={form.humidity_max} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Max Vibration</label>
+                  <input 
+                    name="vibration_max" 
+                    type="number" 
+                    step="0.1"
+                    value={form.vibration_max} 
+                    onChange={handleChange} 
+                    className="w-full border border-border rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+                    disabled={isSaving}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-text-secondary mt-2">
+                These thresholds will be used for anomaly detection and alerting
+              </p>
+            </div>
+
             {/* Photo Upload & AI Analysis */}
             <div className="bg-card rounded-lg border border-border p-6 shadow-card">
-              <h3 className="text-lg font-semibold text-text-primary mb-4">Exhibit Photo & AI Analysis</h3>
+              <h3 className="text-lg font-semibold text-text-primary mb-4">Exhibit Photo & AI Analysis *</h3>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div>
                   <div className="w-full h-48 bg-muted rounded-lg border border-border flex items-center justify-center overflow-hidden mb-4">
@@ -199,7 +408,13 @@ const AddNewExhibit = () => {
                   </div>
                   <div className="space-y-3">
                     <label className="inline-flex items-center px-4 py-2 bg-muted hover:bg-muted/80 border border-border rounded-md cursor-pointer transition-colors">
-                      <input type="file" accept="image/*" className="hidden" onChange={(e) => setPhoto(e.target.files[0])} />
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        className="hidden" 
+                        onChange={(e) => setPhoto(e.target.files[0])}
+                        disabled={isSaving}
+                      />
                       <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                       </svg>
@@ -209,7 +424,7 @@ const AddNewExhibit = () => {
                       <Button 
                         variant="default" 
                         onClick={() => analyzeExhibitPhoto(photo)}
-                        disabled={isAnalyzing}
+                        disabled={isAnalyzing || isSaving}
                         loading={isAnalyzing}
                         className="w-full"
                       >
@@ -341,11 +556,11 @@ const AddNewExhibit = () => {
                 <div>
                   <h3 className="font-semibold text-text-primary mb-1">Ready to Submit?</h3>
                   <p className="text-sm text-text-secondary">
-                    {!form.name && !form.id && !photo && "Complete the form, upload a photo, and run AI analysis"}
-                    {form.name && form.id && !photo && "Upload a photo to enable AI analysis"}
-                    {form.name && form.id && photo && !analysisResult && "Run AI analysis for sensor recommendations"}
-                    {form.name && form.id && photo && analysisResult && "All requirements met - ready to submit"}
-                    {(!form.name || !form.id) && photo && "Complete the exhibit details form"}
+                    {!form.name && !form.location && !photo && "Complete the form, upload a photo, and run AI analysis"}
+                    {form.name && form.location && !photo && "Upload a photo to complete the form"}
+                    {form.name && form.location && photo && !analysisResult && "Run AI analysis for sensor recommendations (optional)"}
+                    {form.name && form.location && photo && analysisResult && "All requirements met - ready to submit"}
+                    {(!form.name || !form.location) && photo && "Complete the exhibit details form"}
                   </p>
                 </div>
                 
@@ -365,7 +580,7 @@ const AddNewExhibit = () => {
                     iconName="Plus" 
                     iconPosition="left" 
                     loading={isSaving} 
-                    disabled={!form.name || !form.id || !photo || isSaving} 
+                    disabled={!form.name || !form.location || !photo || isSaving} 
                     onClick={handleSubmit}
                     className="sm:min-w-[140px]"
                   >

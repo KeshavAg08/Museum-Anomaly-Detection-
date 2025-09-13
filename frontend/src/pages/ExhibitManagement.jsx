@@ -1,7 +1,7 @@
-// ExhibitManagement.jsx - FIXED VERSION
+// ExhibitManagement.jsx - FIXED VERSION with API Integration and Auto Refresh
 
 import React, { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import Header from '../components/ui/Header'
 import Button from '../components/ui/Button'
 import { getCameraStreamUrl } from '../api'
@@ -19,6 +19,9 @@ const ExhibitManagement = () => {
   const [deletingExhibit, setDeletingExhibit] = useState(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [error, setError] = useState(null)
+
+  // Get location to detect navigation from add page
+  const location = useLocation()
 
   // FIXED: Updated API Base URL to match backend
   const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
@@ -158,10 +161,21 @@ const ExhibitManagement = () => {
     }
   }
 
-  // Load exhibits on component mount
+  // Load exhibits on component mount and when location changes
   useEffect(() => {
     fetchExhibits()
-  }, [])
+  }, [location.pathname]) // Re-fetch when navigating back from add page
+
+  // Optional: Auto-refresh every 30 seconds to catch updates
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!isModalOpen && !isEditModalOpen && !isDeleteModalOpen) {
+        fetchExhibits()
+      }
+    }, 30000) // 30 seconds
+
+    return () => clearInterval(interval)
+  }, [isModalOpen, isEditModalOpen, isDeleteModalOpen])
 
   // Event Handlers
   const handleStatusChange = async (exhibitId, newStatus) => {
@@ -359,8 +373,6 @@ const ExhibitManagement = () => {
     )
   }
 
-  // Rest of your component remains the same...
-  // (Loading, Error, and JSX return sections)
   if (loading) {
     return (
       <div className="min-h-screen bg-background">
@@ -405,6 +417,7 @@ const ExhibitManagement = () => {
     <div className="min-h-screen bg-background">
       <Header />
       
+      {/* All modals code remains the same - copying from original for completeness */}
       {/* Exhibit Details Modal */}
       {isModalOpen && selectedExhibit && (
         <div className="fixed inset-0 z-1100 flex items-center justify-center p-4">
@@ -842,7 +855,7 @@ const ExhibitManagement = () => {
 
       <div className="pt-16">
         <div className="max-w-7xl mx-auto px-6 py-8">
-          {/* Page Header */}
+          {/* Page Header with Refresh Button */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-8">
             <div>
               <h1 className="text-3xl font-bold text-text-primary mb-2">Exhibit Management</h1>
@@ -850,7 +863,16 @@ const ExhibitManagement = () => {
                 Monitor and manage all museum exhibits and their operational status
               </p>
             </div>
-            <div className="mt-4 sm:mt-0">
+            <div className="mt-4 sm:mt-0 flex gap-3">
+              <Button 
+                variant="outline" 
+                iconName="RefreshCw" 
+                iconPosition="left"
+                onClick={fetchExhibits}
+                disabled={loading}
+              >
+                Refresh
+              </Button>
               <Link to="/add-new-exhibit">
                 <Button variant="default" iconName="Plus" iconPosition="left">
                   Add New Exhibit
@@ -862,11 +884,33 @@ const ExhibitManagement = () => {
           {/* Summary Cards */}
           <ExhibitSummaryCards exhibits={exhibits} />
 
+          {/* Success Message if coming from add page */}
+          {location.state?.fromAdd && (
+            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+              <div className="flex">
+                <svg className="w-5 h-5 text-green-600 mr-2 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+                <div className="text-sm text-green-800">
+                  <p className="font-medium">Exhibit Added Successfully!</p>
+                  <p>Your new exhibit has been registered in the monitoring system.</p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Exhibits Table */}
           <div className="bg-card rounded-lg border border-border shadow-card">
             <div className="px-6 py-4 border-b border-border">
-              <h3 className="text-lg font-semibold text-text-primary">Exhibits</h3>
-              <p className="text-text-secondary text-sm">Manage your museum exhibits</p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold text-text-primary">Exhibits</h3>
+                  <p className="text-text-secondary text-sm">Manage your museum exhibits</p>
+                </div>
+                <div className="text-sm text-text-secondary">
+                  {exhibits.length} total exhibits
+                </div>
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full">
