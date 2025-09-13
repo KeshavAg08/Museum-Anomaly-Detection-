@@ -16,6 +16,10 @@ const ExhibitManagement = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [deletingExhibit, setDeletingExhibit] = useState(null)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [error, setError] = useState(null)
+
+  // API Base URL - Update this to match your backend
+  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api'
 
   // Available exhibit categories
   const exhibitCategories = [
@@ -35,91 +39,112 @@ const ExhibitManagement = () => {
   const statusOptions = ['Active', 'Maintenance', 'Inactive']
   const maintenanceOptions = ['Daily', 'Weekly', 'Bi-weekly', 'Monthly', 'Quarterly']
 
-  // Mock exhibit data
-  const mockExhibits = [
-    {
-      id: "EXH-001",
-      name: "Interactive Robot Arm",
-      category: "Robotics",
-      status: "Active",
-      lastAnomaly: "2025-01-07T19:45:00Z",
-      installationDate: "March 15, 2024",
-      location: "Robotics Hall - Section A",
-      maintenanceSchedule: "Monthly",
-      sensors: [
-        { type: "Temperature", model: "TMP-117" },
-        { type: "Vibration", model: "ADXL355" },
-        { type: "Visual", model: "OV5647" }
-      ]
-    },
-    {
-      id: "EXH-002",
-      name: "Plasma Ball Display",
-      category: "Physics",
-      status: "Active",
-      lastAnomaly: "2025-01-07T18:30:00Z",
-      installationDate: "January 10, 2024",
-      location: "Physics Wing - Central Display",
-      maintenanceSchedule: "Bi-weekly",
-      sensors: [
-        { type: "Temperature", model: "DS18B20" },
-        { type: "Visual", model: "RPi Camera V2" }
-      ]
-    },
-    {
-      id: "EXH-003",
-      name: "DNA Sequencing Station",
-      category: "Biology",
-      status: "Maintenance",
-      lastAnomaly: "2025-01-07T17:15:00Z",
-      installationDate: "June 8, 2024",
-      location: "Biology Lab - Station 3",
-      maintenanceSchedule: "Weekly",
-      sensors: [
-        { type: "Temperature", model: "SHT30" },
-        { type: "Vibration", model: "MPU6050" }
-      ]
-    },
-    {
-      id: "EXH-004",
-      name: "Holographic Projector",
-      category: "Physics",
-      status: "Active",
-      lastAnomaly: null,
-      installationDate: "August 22, 2024",
-      location: "Physics Wing - Optics Section",
-      maintenanceSchedule: "Monthly",
-      sensors: [
-        { type: "Temperature", model: "MAX31855" },
-        { type: "Visual", model: "Intel RealSense D435" }
-      ]
-    }
-  ]
+  // API Functions
+  const apiCall = async (url, options = {}) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}${url}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers,
+        },
+        ...options,
+      })
 
-  useEffect(() => {
-    const fetchExhibits = async () => {
-      setLoading(true)
-      try {
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        setExhibits(mockExhibits)
-      } catch (error) {
-        console.error('Error fetching exhibits:', error)
-      } finally {
-        setLoading(false)
+      if (!response.ok) {
+        const errorData = await response.text()
+        throw new Error(`HTTP ${response.status}: ${errorData || 'Request failed'}`)
       }
-    }
 
+      const contentType = response.headers.get('content-type')
+      if (contentType && contentType.includes('application/json')) {
+        return await response.json()
+      }
+      return await response.text()
+    } catch (error) {
+      console.error('API call failed:', error)
+      throw error
+    }
+  }
+
+  const fetchExhibits = async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      const data = await apiCall('/exhibits')
+      
+      // Transform the data to match your component's expected format
+      const transformedExhibits = Array.isArray(data) ? data.map(exhibit => ({
+        id: exhibit.id || exhibit._id,
+        name: exhibit.name || '',
+        category: exhibit.category || 'Robotics',
+        status: exhibit.status || 'Active',
+        lastAnomaly: exhibit.lastAnomaly || null,
+        installationDate: exhibit.installationDate || '',
+        location: exhibit.location || '',
+        maintenanceSchedule: exhibit.maintenanceSchedule || 'Monthly',
+        sensors: Array.isArray(exhibit.sensors) ? exhibit.sensors : []
+      })) : []
+      
+      setExhibits(transformedExhibits)
+    } catch (error) {
+      console.error('Error fetching exhibits:', error)
+      setError('Failed to load exhibits. Please check your connection and try again.')
+      setExhibits([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const updateExhibit = async (exhibitId, exhibitData) => {
+    try {
+      const response = await apiCall(`/exhibits/${exhibitId}`, {
+        method: 'PUT',
+        body: JSON.stringify(exhibitData),
+      })
+      return response
+    } catch (error) {
+      console.error('Error updating exhibit:', error)
+      throw error
+    }
+  }
+
+  const deleteExhibit = async (exhibitId) => {
+    try {
+      const response = await apiCall(`/exhibits/${exhibitId}`, {
+        method: 'DELETE',
+      })
+      return response
+    } catch (error) {
+      console.error('Error deleting exhibit:', error)
+      throw error
+    }
+  }
+
+  // Load exhibits on component mount
+  useEffect(() => {
     fetchExhibits()
   }, [])
 
-  const handleStatusChange = (exhibitId, newStatus) => {
-    setExhibits(prevExhibits =>
-      prevExhibits?.map(exhibit =>
-        exhibit?.id === exhibitId
-          ? { ...exhibit, status: newStatus }
-          : exhibit
+  // Event Handlers
+  const handleStatusChange = async (exhibitId, newStatus) => {
+    try {
+      const exhibit = exhibits.find(e => e.id === exhibitId)
+      if (!exhibit) return
+
+      const updatedExhibitData = { ...exhibit, status: newStatus }
+      await updateExhibit(exhibitId, updatedExhibitData)
+      
+      // Update local state
+      setExhibits(prevExhibits =>
+        prevExhibits.map(exhibit =>
+          exhibit.id === exhibitId
+            ? { ...exhibit, status: newStatus }
+            : exhibit
+        )
       )
-    )
+    } catch (error) {
+      alert(`Failed to update exhibit status: ${error.message}`)
+    }
   }
 
   const handleViewExhibit = (exhibit) => {
@@ -159,10 +184,10 @@ const ExhibitManagement = () => {
     setIsSaving(true)
     
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 1500))
+      // Make actual API call
+      await updateExhibit(editingExhibit.id, editForm)
       
-      // Update the exhibit in the state
+      // Update the exhibit in the local state
       setExhibits(prevExhibits =>
         prevExhibits.map(exhibit =>
           exhibit.id === editingExhibit.id
@@ -178,7 +203,7 @@ const ExhibitManagement = () => {
       
     } catch (error) {
       console.error('Failed to save exhibit:', error)
-      alert('Failed to save exhibit. Please try again.')
+      alert(`Failed to save exhibit: ${error.message}`)
     } finally {
       setIsSaving(false)
     }
@@ -201,10 +226,10 @@ const ExhibitManagement = () => {
     setIsDeleting(true)
     
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 1500))
+      // Make actual API call
+      await deleteExhibit(deletingExhibit.id)
       
-      // Remove the exhibit from the state
+      // Remove the exhibit from the local state
       setExhibits(prevExhibits =>
         prevExhibits.filter(exhibit => exhibit.id !== deletingExhibit.id)
       )
@@ -216,7 +241,7 @@ const ExhibitManagement = () => {
       
     } catch (error) {
       console.error('Failed to delete exhibit:', error)
-      alert('Failed to delete exhibit. Please try again.')
+      alert(`Failed to delete exhibit: ${error.message}`)
     } finally {
       setIsDeleting(false)
     }
@@ -296,7 +321,6 @@ const ExhibitManagement = () => {
       </div>
     )
   }
-
   if (loading) {
     return (
       <div className="min-h-screen bg-background">
@@ -306,6 +330,30 @@ const ExhibitManagement = () => {
             <div className="text-center">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
               <p className="text-text-secondary">Loading exhibits...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-background">
+        <Header />
+        <div className="pt-16">
+          <div className="flex items-center justify-center h-96">
+            <div className="text-center">
+              <div className="text-red-600 mb-4">
+                <svg className="w-12 h-12 mx-auto mb-2" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <p className="text-text-primary font-medium mb-2">Unable to load exhibits</p>
+              <p className="text-text-secondary mb-4">{error}</p>
+              <Button onClick={fetchExhibits} variant="outline">
+                Try Again
+              </Button>
             </div>
           </div>
         </div>
@@ -390,8 +438,10 @@ const ExhibitManagement = () => {
                     alt={`Live feed for ${selectedExhibit.name}`}
                     className="w-full h-full object-cover"
                     onError={(e) => {
-                      e.target.style.display = 'none';
-                      e.target.nextSibling.style.display = 'flex';
+                      e.target.style.display = 'none'
+                      if (e.target.nextSibling) {
+                        e.target.nextSibling.style.display = 'flex'
+                      }
                     }}
                   />
                   <div 
@@ -449,30 +499,30 @@ const ExhibitManagement = () => {
                 <div>
                   <h4 className="text-lg font-semibold text-text-primary mb-3">Sensor Configuration</h4>
                   <div className="space-y-2">
-                    {selectedExhibit.sensors.map((sensor, index) => (
-                      <div key={index} className="flex items-center justify-between p-3 bg-muted rounded-lg">
-                        <div className="flex items-center space-x-3">
-                          <div className={`w-3 h-3 rounded-full bg-green-500`}></div>
-                          <div>
-                            <p className="font-medium text-text-primary text-sm">{sensor.type}</p>
-                            <p className="text-text-secondary text-xs">{sensor.model}</p>
+                    {selectedExhibit.sensors && selectedExhibit.sensors.length > 0 ? (
+                      selectedExhibit.sensors.map((sensor, index) => (
+                        <div key={index} className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                          <div className="flex items-center space-x-3">
+                            <div className={`w-3 h-3 rounded-full bg-green-500`}></div>
+                            <div>
+                              <p className="font-medium text-text-primary text-sm">{sensor.type}</p>
+                              <p className="text-text-secondary text-xs">{sensor.model}</p>
+                            </div>
+                          </div>
+                          <div className="text-green-600 text-xs font-medium bg-green-100 px-2 py-1 rounded-full">
+                            Active
                           </div>
                         </div>
-                        <div className="text-green-600 text-xs font-medium bg-green-100 px-2 py-1 rounded-full">
-                          Active
-                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center text-text-secondary py-8">
+                        <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                        </svg>
+                        <p className="text-sm">No sensors configured</p>
                       </div>
-                    ))}
+                    )}
                   </div>
-                  
-                  {selectedExhibit.sensors.length === 0 && (
-                    <div className="text-center text-text-secondary py-8">
-                      <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                      </svg>
-                      <p className="text-sm">No sensors configured</p>
-                    </div>
-                  )}
                 </div>
               </div>
               
@@ -488,8 +538,8 @@ const ExhibitManagement = () => {
                 <Button 
                   variant="default" 
                   onClick={() => {
-                    closeModal();
-                    handleEditExhibit(selectedExhibit);
+                    closeModal()
+                    handleEditExhibit(selectedExhibit)
                   }}
                   className="flex-1 sm:flex-none"
                 >
@@ -501,8 +551,8 @@ const ExhibitManagement = () => {
                     handleStatusChange(
                       selectedExhibit.id, 
                       selectedExhibit.status === 'Active' ? 'Maintenance' : 'Active'
-                    );
-                    closeModal();
+                    )
+                    closeModal()
                   }}
                   className="flex-1 sm:flex-none"
                 >
@@ -517,7 +567,7 @@ const ExhibitManagement = () => {
       {/* Edit Exhibit Modal */}
       {isEditModalOpen && editingExhibit && (
         <div className="fixed inset-0 z-1100 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black bg-opacity-50" onClick={closeEditModal}></div>
+          <div className="absolute inset-0 bg-black bg-opacity-50" onClick={!isSaving ? closeEditModal : undefined}></div>
           <div className="relative bg-card rounded-lg border border-border shadow-modal w-full max-w-3xl max-h-[90vh] overflow-y-auto z-1100">
             <div className="sticky top-0 bg-card rounded-t-lg px-6 py-4 border-b border-border">
               <div className="flex items-center justify-between">
@@ -695,7 +745,7 @@ const ExhibitManagement = () => {
       {/* Delete Confirmation Modal */}
       {isDeleteModalOpen && deletingExhibit && (
         <div className="fixed inset-0 z-1100 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black bg-opacity-50" onClick={closeDeleteModal}></div>
+          <div className="absolute inset-0 bg-black bg-opacity-50" onClick={!isDeleting ? closeDeleteModal : undefined}></div>
           <div className="relative bg-card rounded-lg border border-border shadow-modal w-full max-w-md z-1100">
             <div className="p-6">
               <div className="flex items-center mb-4">
@@ -791,7 +841,7 @@ const ExhibitManagement = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-card divide-y divide-border">
-                  {exhibits.map((exhibit) => (
+                  {exhibits.length > 0 ? exhibits.map((exhibit) => (
                     <tr key={exhibit.id} className="hover:bg-muted/50">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>
@@ -836,7 +886,22 @@ const ExhibitManagement = () => {
                         </button>
                       </td>
                     </tr>
-                  ))}
+                  )) : (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-12 text-center">
+                        <div className="text-center">
+                          <svg className="w-12 h-12 mx-auto text-text-secondary mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                          </svg>
+                          <h3 className="text-lg font-medium text-text-primary mb-2">No exhibits found</h3>
+                          <p className="text-text-secondary mb-4">Get started by adding your first exhibit to the system.</p>
+                          <Link to="/add-new-exhibit">
+                            <Button variant="default">Add New Exhibit</Button>
+                          </Link>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
