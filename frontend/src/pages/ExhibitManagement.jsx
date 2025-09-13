@@ -1,3 +1,5 @@
+// ExhibitManagement.jsx - FIXED VERSION
+
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import Header from '../components/ui/Header'
@@ -18,28 +20,28 @@ const ExhibitManagement = () => {
   const [isDeleting, setIsDeleting] = useState(false)
   const [error, setError] = useState(null)
 
-  // API Base URL - Update this to match your backend
-  const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api'
+  // FIXED: Updated API Base URL to match backend
+  const API_BASE_URL = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
   // Available exhibit categories
   const exhibitCategories = [
-    'Robotics',
-    'Physics',
-    'Biology',
-    'Chemistry',
-    'Interactive Technology',
+    'Ancient Artifacts',
+    'Modern Art Collection', 
     'Natural History',
-    'Art & Culture',
-    'Historical Artifacts',
-    'Space & Astronomy',
-    'Digital Media'
+    'Science & Technology',
+    'Cultural Heritage',
+    'Interactive Exhibits',
+    'Historical Documents',
+    'Sculptures',
+    'Paintings',
+    'Multimedia Displays'
   ]
 
   // Available status options
   const statusOptions = ['Active', 'Maintenance', 'Inactive']
   const maintenanceOptions = ['Daily', 'Weekly', 'Bi-weekly', 'Monthly', 'Quarterly']
 
-  // API Functions
+  // FIXED: Updated API Functions to match backend format
   const apiCall = async (url, options = {}) => {
     try {
       const response = await fetch(`${API_BASE_URL}${url}`, {
@@ -70,25 +72,46 @@ const ExhibitManagement = () => {
     try {
       setLoading(true)
       setError(null)
+      console.log('Fetching exhibits from:', `${API_BASE_URL}/exhibits`)
+      
       const data = await apiCall('/exhibits')
+      console.log('Raw API response:', data)
       
-      // Transform the data to match your component's expected format
-      const transformedExhibits = Array.isArray(data) ? data.map(exhibit => ({
+      // FIXED: Handle the backend response format {"exhibits": [...]}
+      let exhibitsArray = []
+      if (data && data.exhibits && Array.isArray(data.exhibits)) {
+        exhibitsArray = data.exhibits
+      } else if (Array.isArray(data)) {
+        exhibitsArray = data
+      }
+      
+      // Transform the data to match frontend expectations
+      const transformedExhibits = exhibitsArray.map(exhibit => ({
         id: exhibit.id || exhibit._id,
-        name: exhibit.name || '',
-        category: exhibit.category || 'Robotics',
-        status: exhibit.status || 'Active',
-        lastAnomaly: exhibit.lastAnomaly || null,
-        installationDate: exhibit.installationDate || '',
-        location: exhibit.location || '',
-        maintenanceSchedule: exhibit.maintenanceSchedule || 'Monthly',
-        sensors: Array.isArray(exhibit.sensors) ? exhibit.sensors : []
-      })) : []
+        name: exhibit.name || 'Unnamed Exhibit',
+        category: exhibit.category || 'Ancient Artifacts', // Default from backend
+        status: 'Active', // Default status
+        lastAnomaly: null,
+        installationDate: exhibit.created_at ? new Date(exhibit.created_at).toLocaleDateString() : '',
+        location: exhibit.location || 'Unknown Location',
+        maintenanceSchedule: 'Monthly',
+        sensors: [], // Backend doesn't have sensors field in this format
+        // Additional fields from backend
+        description: exhibit.description,
+        temperature_min: exhibit.temperature_min,
+        temperature_max: exhibit.temperature_max,
+        humidity_min: exhibit.humidity_min,
+        humidity_max: exhibit.humidity_max,
+        vibration_max: exhibit.vibration_max,
+        created_at: exhibit.created_at,
+        updated_at: exhibit.updated_at
+      }))
       
+      console.log('Transformed exhibits:', transformedExhibits)
       setExhibits(transformedExhibits)
     } catch (error) {
       console.error('Error fetching exhibits:', error)
-      setError('Failed to load exhibits. Please check your connection and try again.')
+      setError(`Failed to load exhibits: ${error.message}`)
       setExhibits([])
     } finally {
       setLoading(false)
@@ -97,9 +120,23 @@ const ExhibitManagement = () => {
 
   const updateExhibit = async (exhibitId, exhibitData) => {
     try {
+      console.log('Updating exhibit:', exhibitId, exhibitData)
+      
+      // Transform frontend data to backend format
+      const backendData = {
+        name: exhibitData.name,
+        description: exhibitData.description || '',
+        location: exhibitData.location,
+        temperature_min: exhibitData.temperature_min || 18.0,
+        temperature_max: exhibitData.temperature_max || 24.0,
+        humidity_min: exhibitData.humidity_min || 40.0,
+        humidity_max: exhibitData.humidity_max || 60.0,
+        vibration_max: exhibitData.vibration_max || 0.5
+      }
+      
       const response = await apiCall(`/exhibits/${exhibitId}`, {
         method: 'PUT',
-        body: JSON.stringify(exhibitData),
+        body: JSON.stringify(backendData),
       })
       return response
     } catch (error) {
@@ -110,6 +147,7 @@ const ExhibitManagement = () => {
 
   const deleteExhibit = async (exhibitId) => {
     try {
+      console.log('Deleting exhibit:', exhibitId)
       const response = await apiCall(`/exhibits/${exhibitId}`, {
         method: 'DELETE',
       })
@@ -131,10 +169,7 @@ const ExhibitManagement = () => {
       const exhibit = exhibits.find(e => e.id === exhibitId)
       if (!exhibit) return
 
-      const updatedExhibitData = { ...exhibit, status: newStatus }
-      await updateExhibit(exhibitId, updatedExhibitData)
-      
-      // Update local state
+      // Since backend doesn't have status field, we'll just update local state
       setExhibits(prevExhibits =>
         prevExhibits.map(exhibit =>
           exhibit.id === exhibitId
@@ -142,6 +177,8 @@ const ExhibitManagement = () => {
             : exhibit
         )
       )
+      
+      console.log(`Status changed for exhibit ${exhibitId} to ${newStatus}`)
     } catch (error) {
       alert(`Failed to update exhibit status: ${error.message}`)
     }
@@ -185,7 +222,7 @@ const ExhibitManagement = () => {
     
     try {
       // Make actual API call
-      await updateExhibit(editingExhibit.id, editForm)
+      const updatedExhibit = await updateExhibit(editingExhibit.id, editForm)
       
       // Update the exhibit in the local state
       setExhibits(prevExhibits =>
@@ -321,6 +358,9 @@ const ExhibitManagement = () => {
       </div>
     )
   }
+
+  // Rest of your component remains the same...
+  // (Loading, Error, and JSX return sections)
   if (loading) {
     return (
       <div className="min-h-screen bg-background">
