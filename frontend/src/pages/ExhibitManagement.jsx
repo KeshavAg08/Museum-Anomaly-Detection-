@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import Header from '../components/ui/Header'
 import Button from '../components/ui/Button'
-import VisionAnomalyDetector from '../components/VisionAnomalyDetector'
 import { getCameraStreamUrl } from '../api'
 
 const ExhibitManagement = () => {
@@ -377,9 +376,44 @@ const ExhibitManagement = () => {
                 </div>
               </div>
               
-              {/* Vision Anomaly Detection */}
+              {/* Camera Feed */}
               <div className="mb-6">
-                <VisionAnomalyDetector exhibitId={selectedExhibit.id} />
+                <h4 className="text-lg font-semibold text-text-primary mb-3 flex items-center">
+                  <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Live Camera Feed
+                </h4>
+                <div className="bg-black rounded-lg overflow-hidden" style={{aspectRatio: '16/9'}}>
+                  <img 
+                    src={getCameraStreamUrl(selectedExhibit.id)}
+                    alt={`Live feed for ${selectedExhibit.name}`}
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      e.target.style.display = 'none';
+                      e.target.nextSibling.style.display = 'flex';
+                    }}
+                  />
+                  <div 
+                    className="w-full h-full flex items-center justify-center text-white" 
+                    style={{display: 'none'}}
+                  >
+                    <div className="text-center">
+                      <svg className="w-16 h-16 mx-auto mb-4 opacity-50" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+                      </svg>
+                      <p className="text-sm">Camera feed unavailable</p>
+                      <p className="text-xs opacity-75 mt-1">Check camera connection</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-2 flex items-center justify-between text-xs text-text-secondary">
+                  <span>Camera ID: {selectedExhibit.id}-CAM</span>
+                  <div className="flex items-center">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse mr-1"></div>
+                    <span>Live</span>
+                  </div>
+                </div>
               </div>
               
               {/* Exhibit Information */}
