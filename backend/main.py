@@ -1,259 +1,610 @@
-import asyncio
-import io
-import os
-import random
-from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional, List, Dict
-
-import httpx
-from PIL import Image
-from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, HTTPException, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from ultralytics import YOLO
+from typing import Dict, Any, Optional, List
+import uvicorn
+import asyncio
+import json
+import random
+import time
+import os
+from datetime import datetime
+import httpx
+import io
+from PIL import Image
+import sqlite3
+import logging
+from contextlib import contextmanager
 
-# Load environment variables
-load_dotenv()
+app = FastAPI(title="Museum Anomaly Detection API", version="1.0.0")
 
-# Environment variables
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-ESP32_CAM_URL = os.getenv("ESP32_CAM_URL")
-MOCK_SENSORS = os.getenv("MOCK_SENSORS", "true").lower() == "true"
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Initialize YOLO model
-yolo_model = None
-try:
-    yolo_model = YOLO('yolov8n.pt')
-except Exception as e:
-    print(f"Warning: Could not load YOLO model: {e}")
-
-# FastAPI app
-app = FastAPI(title="Museum Anomaly Dashboard API", version="1.0")
-
-# CORS
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        FRONTEND_ORIGIN,
-        "https://museum-anomaly-detection.vercel.app",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174"
-    ],
+    allow_origins=["*"],  # Configure properly for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Configuration
+MOCK_SENSORS = os.getenv("MOCK_SENSORS", "true").lower() == "true"
+ESP32_CAM_URL = os.getenv("ESP32_CAM_URL")
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+DATABASE_URL = os.getenv("DATABASE_URL", "museum.db")
 
-# ---------------------- MODELS ----------------------
+# Data models
 class SensorData(BaseModel):
-    temperature_c: float
-    humidity_pct: float
+    temperature: float
+    humidity: float
     vibration: float
-    vibration_triggered: bool
+    timestamp: Optional[str] = None
+
+class Exhibit(BaseModel):
+    id: Optional[int] = None
+    name: str
+    description: str
+    location: str
+    temperature_min: Optional[float] = 18.0
+    temperature_max: Optional[float] = 24.0
+    humidity_min: Optional[float] = 40.0
+    humidity_max: Optional[float] = 60.0
+    vibration_max: Optional[float] = 0.5
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+class ExhibitUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    location: Optional[str] = None
+    temperature_min: Optional[float] = None
+    temperature_max: Optional[float] = None
+    humidity_min: Optional[float] = None
+    humidity_max: Optional[float] = None
+    vibration_max: Optional[float] = None
+
+class ChatMessage(BaseModel):
+    message: str
+    context: Optional[str] = None
+
+class AnomalyCheck(BaseModel):
+    sensor_data: SensorData
+    exhibit_id: Optional[int] = None
+    threshold_config: Optional[Dict[str, float]] = None
+
+class ChatResponse(BaseModel):
+    response: str
     timestamp: str
 
-class ChatRequest(BaseModel):
-    question: str
-    context: Optional[dict] = None
+class AnomalyResponse(BaseModel):
+    is_anomaly: bool
+    anomaly_score: float
+    explanation: str
+    affected_sensors: list
+    timestamp: str
 
-class AnomalyRequest(BaseModel):
-    temperature_c: Optional[float] = None
-    humidity_pct: Optional[float] = None
-    vibration: Optional[float] = None
-    sensors: Optional[SensorData] = None
+# Database setup
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DATABASE_URL)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
-class VisionDetection(BaseModel):
-    label: str
-    confidence: float
-    bbox: List[float]
+def init_database():
+    """Initialize the database with required tables"""
+    with get_db() as conn:
+        # Create exhibits table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS exhibits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                temperature_min REAL DEFAULT 18.0,
+                temperature_max REAL DEFAULT 24.0,
+                humidity_min REAL DEFAULT 40.0,
+                humidity_max REAL DEFAULT 60.0,
+                vibration_max REAL DEFAULT 0.5,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create sensor_readings table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS sensor_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exhibit_id INTEGER,
+                temperature REAL,
+                humidity REAL,
+                vibration REAL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (exhibit_id) REFERENCES exhibits (id)
+            )
+        ''')
+        
+        # Create anomalies table
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS anomalies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exhibit_id INTEGER,
+                anomaly_type TEXT,
+                severity REAL,
+                description TEXT,
+                sensor_data TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (exhibit_id) REFERENCES exhibits (id)
+            )
+        ''')
+        
+        conn.commit()
+        logger.info("Database initialized successfully")
 
-class VisionResponse(BaseModel):
-    detections: List[VisionDetection]
-    anomaly_detected: bool
-    status: str
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_database()
+    # Add some sample exhibits if none exist
+    with get_db() as conn:
+        cursor = conn.execute("SELECT COUNT(*) as count FROM exhibits")
+        count = cursor.fetchone()['count']
+        if count == 0:
+            sample_exhibits = [
+                ("Ancient Vase", "2000-year-old ceramic vase from Roman period", "Gallery A", 20.0, 22.0, 45.0, 55.0, 0.3),
+                ("Medieval Manuscript", "Illuminated manuscript from 13th century", "Gallery B", 18.0, 21.0, 40.0, 50.0, 0.2),
+                ("Oil Painting", "Renaissance oil painting", "Gallery C", 19.0, 23.0, 45.0, 60.0, 0.4)
+            ]
+            for exhibit in sample_exhibits:
+                conn.execute('''
+                    INSERT INTO exhibits (name, description, location, temperature_min, temperature_max, 
+                                        humidity_min, humidity_max, vibration_max)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', exhibit)
+            conn.commit()
+            logger.info("Sample exhibits added to database")
 
-# ---------------------- UTILS ----------------------
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# Database functions
+def create_exhibit(exhibit: Exhibit) -> Exhibit:
+    """Create a new exhibit in the database"""
+    with get_db() as conn:
+        cursor = conn.execute('''
+            INSERT INTO exhibits (name, description, location, temperature_min, temperature_max,
+                                humidity_min, humidity_max, vibration_max)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (exhibit.name, exhibit.description, exhibit.location, exhibit.temperature_min,
+              exhibit.temperature_max, exhibit.humidity_min, exhibit.humidity_max, exhibit.vibration_max))
+        
+        exhibit_id = cursor.lastrowid
+        conn.commit()
+        
+        # Fetch the created exhibit
+        cursor = conn.execute('''
+            SELECT * FROM exhibits WHERE id = ?
+        ''', (exhibit_id,))
+        row = cursor.fetchone()
+        
+        return Exhibit(
+            id=row['id'],
+            name=row['name'],
+            description=row['description'],
+            location=row['location'],
+            temperature_min=row['temperature_min'],
+            temperature_max=row['temperature_max'],
+            humidity_min=row['humidity_min'],
+            humidity_max=row['humidity_max'],
+            vibration_max=row['vibration_max'],
+            created_at=row['created_at'],
+            updated_at=row['updated_at']
+        )
 
-def generate_mock_sensors() -> SensorData:
-    base_temp = random.uniform(18.5, 23.5)
-    base_humidity = random.uniform(35.0, 55.0)
-    vib = max(0.0, random.gauss(0.02, 0.02))
-    if random.random() < 0.07: base_temp += random.uniform(4, 8)
-    if random.random() < 0.06: base_humidity += random.uniform(15, 30)
-    if random.random() < 0.05: vib += random.uniform(0.3, 0.8)
+def get_all_exhibits() -> List[Exhibit]:
+    """Get all exhibits from the database"""
+    with get_db() as conn:
+        cursor = conn.execute("SELECT * FROM exhibits ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        
+        exhibits = []
+        for row in rows:
+            exhibits.append(Exhibit(
+                id=row['id'],
+                name=row['name'],
+                description=row['description'],
+                location=row['location'],
+                temperature_min=row['temperature_min'],
+                temperature_max=row['temperature_max'],
+                humidity_min=row['humidity_min'],
+                humidity_max=row['humidity_max'],
+                vibration_max=row['vibration_max'],
+                created_at=row['created_at'],
+                updated_at=row['updated_at']
+            ))
+        return exhibits
+
+def get_exhibit_by_id(exhibit_id: int) -> Optional[Exhibit]:
+    """Get a specific exhibit by ID"""
+    with get_db() as conn:
+        cursor = conn.execute("SELECT * FROM exhibits WHERE id = ?", (exhibit_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            return Exhibit(
+                id=row['id'],
+                name=row['name'],
+                description=row['description'],
+                location=row['location'],
+                temperature_min=row['temperature_min'],
+                temperature_max=row['temperature_max'],
+                humidity_min=row['humidity_min'],
+                humidity_max=row['humidity_max'],
+                vibration_max=row['vibration_max'],
+                created_at=row['created_at'],
+                updated_at=row['updated_at']
+            )
+        return None
+
+def update_exhibit(exhibit_id: int, updates: ExhibitUpdate) -> Optional[Exhibit]:
+    """Update an existing exhibit"""
+    with get_db() as conn:
+        # Build dynamic update query
+        update_fields = []
+        values = []
+        
+        for field, value in updates.dict(exclude_unset=True).items():
+            if value is not None:
+                update_fields.append(f"{field} = ?")
+                values.append(value)
+        
+        if not update_fields:
+            return get_exhibit_by_id(exhibit_id)
+        
+        update_fields.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(exhibit_id)
+        
+        query = f"UPDATE exhibits SET {', '.join(update_fields)} WHERE id = ?"
+        cursor = conn.execute(query, values)
+        
+        if cursor.rowcount == 0:
+            return None
+            
+        conn.commit()
+        return get_exhibit_by_id(exhibit_id)
+
+def delete_exhibit(exhibit_id: int) -> bool:
+    """Delete an exhibit from the database"""
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM exhibits WHERE id = ?", (exhibit_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        return deleted
+
+def save_sensor_reading(exhibit_id: int, sensor_data: SensorData):
+    """Save sensor reading to database"""
+    with get_db() as conn:
+        conn.execute('''
+            INSERT INTO sensor_readings (exhibit_id, temperature, humidity, vibration)
+            VALUES (?, ?, ?, ?)
+        ''', (exhibit_id, sensor_data.temperature, sensor_data.humidity, sensor_data.vibration))
+        conn.commit()
+
+def save_anomaly(exhibit_id: int, anomaly_type: str, severity: float, description: str, sensor_data: str):
+    """Save anomaly detection result to database"""
+    with get_db() as conn:
+        conn.execute('''
+            INSERT INTO anomalies (exhibit_id, anomaly_type, severity, description, sensor_data)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (exhibit_id, anomaly_type, severity, description, sensor_data))
+        conn.commit()
+
+# Default thresholds for anomaly detection
+DEFAULT_THRESHOLDS = {
+    "temperature": {"min": 18.0, "max": 24.0},
+    "humidity": {"min": 40.0, "max": 60.0},
+    "vibration": {"min": 0.0, "max": 0.5}
+}
+
+# Mock sensor data generator
+def generate_mock_sensor_data() -> SensorData:
+    # Add some randomness to make it interesting
+    base_temp = 21.0 + random.uniform(-2, 3)
+    base_humidity = 50.0 + random.uniform(-10, 15)
+    base_vibration = random.uniform(0, 1.0)
+    
+    # Occasionally generate anomalous readings
+    if random.random() < 0.1:  # 10% chance of anomaly
+        if random.choice([True, False]):
+            base_temp += random.uniform(5, 10)  # High temperature
+        else:
+            base_vibration += random.uniform(2, 5)  # High vibration
+    
     return SensorData(
-        temperature_c=round(base_temp, 2),
-        humidity_pct=round(base_humidity, 2),
-        vibration=round(vib, 3),
-        vibration_triggered=vib > 0.25,
-        timestamp=now_iso(),
+        temperature=round(base_temp, 1),
+        humidity=round(base_humidity, 1),
+        vibration=round(base_vibration, 2),
+        timestamp=datetime.now().isoformat()
     )
 
-def basic_anomaly_rules(s: SensorData) -> dict:
-    issues = []
-    if s.temperature_c < 16 or s.temperature_c > 26:
-        issues.append({"type": "temperature", "message": f"Temperature: {s.temperature_c}C"})
-    if s.humidity_pct < 35 or s.humidity_pct > 60:
-        issues.append({"type": "humidity", "message": f"Humidity: {s.humidity_pct}%"})
-    if s.vibration_triggered or s.vibration > 0.25:
-        issues.append({"type": "vibration", "message": f"Vibration spike: {s.vibration}"})
-    return {"has_anomaly": len(issues) > 0, "issues": issues}
+# Rule-based anomaly detection
+def detect_anomaly_rule_based(data: SensorData, thresholds: Dict = None) -> Dict[str, Any]:
+    if thresholds is None:
+        thresholds = DEFAULT_THRESHOLDS
+    
+    anomalies = []
+    scores = []
+    
+    # Check temperature
+    temp_threshold = thresholds.get("temperature", DEFAULT_THRESHOLDS["temperature"])
+    if data.temperature < temp_threshold["min"]:
+        anomalies.append("temperature_low")
+        scores.append(abs(data.temperature - temp_threshold["min"]) / temp_threshold["min"])
+    elif data.temperature > temp_threshold["max"]:
+        anomalies.append("temperature_high")
+        scores.append(abs(data.temperature - temp_threshold["max"]) / temp_threshold["max"])
+    
+    # Check humidity
+    humidity_threshold = thresholds.get("humidity", DEFAULT_THRESHOLDS["humidity"])
+    if data.humidity < humidity_threshold["min"]:
+        anomalies.append("humidity_low")
+        scores.append(abs(data.humidity - humidity_threshold["min"]) / humidity_threshold["min"])
+    elif data.humidity > humidity_threshold["max"]:
+        anomalies.append("humidity_high")
+        scores.append(abs(data.humidity - humidity_threshold["max"]) / humidity_threshold["max"])
+    
+    # Check vibration
+    vibration_threshold = thresholds.get("vibration", DEFAULT_THRESHOLDS["vibration"])
+    if data.vibration > vibration_threshold["max"]:
+        anomalies.append("vibration_high")
+        scores.append(abs(data.vibration - vibration_threshold["max"]) / vibration_threshold["max"])
+    
+    is_anomaly = len(anomalies) > 0
+    anomaly_score = max(scores) if scores else 0.0
+    
+    return {
+        "is_anomaly": is_anomaly,
+        "anomaly_score": min(anomaly_score, 1.0),
+        "anomalies": anomalies,
+        "affected_sensors": [anomaly.split('_')[0] for anomaly in anomalies]
+    }
 
-# ---------------------- AI HELPERS ----------------------
-async def call_openrouter_llama(messages: List[Dict[str, str]], temperature: float = 0.2) -> Optional[str]:
-    if not OPENROUTER_API_KEY:
-        return None
-    try:
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": "meta-llama/llama-3-8b-instruct",
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": 1000
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers, json=payload
-            )
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"]
-            else:
-                print(f"OpenRouter error {response.status_code}: {response.text}")
-                return None
-    except Exception as e:
-        print(f"OpenRouter exception: {e}")
-        return None
-
-async def call_openai(messages, temperature=0.2) -> Optional[str]:
-    if not OPENAI_API_KEY:
-        return None
-    try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=temperature
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        print(f"OpenAI error: {e}")
-        return None
-
-# ---------------------- YOLO HELPERS ----------------------
-def process_yolo_detections(results) -> List[VisionDetection]:
-    detections = []
-    if results and len(results) > 0:
-        result = results[0]
-        if result.boxes is not None:
-            for i in range(len(result.boxes)):
-                box = result.boxes.xyxy[i].cpu().numpy()
-                confidence = float(result.boxes.conf[i].cpu().numpy())
-                class_id = int(result.boxes.cls[i].cpu().numpy())
-                class_name = result.names[class_id] if result.names else f"class_{class_id}"
-                detections.append(VisionDetection(
-                    label=class_name, confidence=confidence, bbox=box.tolist()
-                ))
-    return detections
-
-def detect_vision_anomaly(detections: List[VisionDetection]) -> bool:
-    normal_objects = {'person','chair','book','vase','bottle','cup','bowl',
-        'dining table','potted plant','couch','tv','laptop','mouse','remote',
-        'keyboard','cell phone','clock','scissors','teddy bear'}
-    if not detections:
-        return False
-    for d in detections:
-        if d.confidence > 0.5 and d.label not in normal_objects:
-            return True
-    return False
-
-# ---------------------- CAMERA STREAM ----------------------
-async def proxy_mjpeg_stream() -> AsyncGenerator[bytes, None]:
-    if ESP32_CAM_URL:
-        timeout = httpx.Timeout(10.0, read=None)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("GET", ESP32_CAM_URL) as r:
-                async for chunk in r.aiter_bytes():
-                    yield chunk
+# Generate explanation for anomalies
+def generate_anomaly_explanation(anomalies: list, sensor_data: SensorData) -> str:
+    if not anomalies:
+        return "All sensor readings are within normal parameters."
+    
+    explanations = {
+        "temperature_high": f"Temperature ({sensor_data.temperature}°C) is above safe levels. This could damage artifacts or promote mold growth.",
+        "temperature_low": f"Temperature ({sensor_data.temperature}°C) is below recommended levels. This could cause condensation or material stress.",
+        "humidity_high": f"Humidity ({sensor_data.humidity}%) is too high. This increases risk of mold, corrosion, and deterioration.",
+        "humidity_low": f"Humidity ({sensor_data.humidity}%) is too low. This can cause cracking and brittleness in organic materials.",
+        "vibration_high": f"Vibration levels ({sensor_data.vibration}) are excessive. This could indicate structural issues or nearby construction."
+    }
+    
+    selected_explanations = [explanations.get(anomaly, f"Anomaly detected: {anomaly}") for anomaly in anomalies]
+    
+    if len(selected_explanations) == 1:
+        return selected_explanations[0]
     else:
-        boundary = "frame"
-        jpeg_bytes = b"\xff\xd8\xff\xd9"
-        while True:
-            yield (
-                b"--" + boundary.encode() + b"\r\n" +
-                b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
-            )
-            await asyncio.sleep(0.5)
+        return "Multiple issues detected: " + " | ".join(selected_explanations)
 
-# ---------------------- ROUTES ----------------------
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root():
-    return {"status": "Backend is running", "message": "Welcome to the Museum Anomaly Dashboard API"}
+# Simple chat responses (replace with your preferred AI service)
+def generate_chat_response(message: str, context: str = None) -> str:
+    message_lower = message.lower()
+    
+    # Museum-specific responses
+    if any(word in message_lower for word in ["temperature", "temp"]):
+        return "The ideal temperature range for museum exhibits is 18-24°C (64-75°F). Sudden changes should be avoided as they can cause expansion and contraction damage to artifacts."
+    
+    elif any(word in message_lower for word in ["humidity", "moisture"]):
+        return "Museum humidity should be maintained between 40-60% RH. High humidity promotes mold and corrosion, while low humidity can cause cracking in organic materials."
+    
+    elif any(word in message_lower for word in ["vibration", "shake", "movement"]):
+        return "Vibrations from construction, traffic, or HVAC systems can damage delicate artifacts over time. Monitor levels and install dampening systems if needed."
+    
+    elif any(word in message_lower for word in ["anomaly", "alert", "problem"]):
+        return "Anomalies indicate conditions outside normal parameters. Investigate immediately to prevent artifact damage. Check HVAC systems, sensors, and environmental controls."
+    
+    elif any(word in message_lower for word in ["artifact", "artwork", "collection"]):
+        return "Proper environmental monitoring is crucial for artifact preservation. Different materials have specific requirements - metals, organics, and textiles each need different conditions."
+    
+    elif any(word in message_lower for word in ["exhibit"]):
+        return "Each exhibit may have unique environmental requirements. You can configure custom thresholds for temperature, humidity, and vibration for each exhibit in the system."
+    
+    elif any(word in message_lower for word in ["help", "how", "what"]):
+        return "I can help with museum environmental monitoring questions. Ask me about temperature, humidity, vibration thresholds, or artifact preservation best practices."
+    
+    else:
+        return f"I understand you're asking about: '{message}'. For museum environmental monitoring, I recommend checking temperature (18-24°C), humidity (40-60% RH), and vibration levels regularly."
 
+# Create placeholder image for camera stream
+def create_placeholder_image():
+    img = Image.new('RGB', (640, 480), color='lightgray')
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format='JPEG', quality=70)
+    return img_bytes.getvalue()
+
+# API Endpoints
 @app.get("/health")
-async def health():
-    return {"status": "ok", "timestamp": now_iso()}
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "mock_mode": MOCK_SENSORS,
+        "database": "connected"
+    }
 
-@app.get("/sensors/data", response_model=SensorData)
-async def get_sensors_data():
-    return generate_mock_sensors()
+# Exhibit management endpoints
+@app.post("/exhibits")
+async def create_exhibit_endpoint(exhibit: Exhibit):
+    """Create a new exhibit"""
+    try:
+        created_exhibit = create_exhibit(exhibit)
+        return created_exhibit
+    except Exception as e:
+        logger.error(f"Error creating exhibit: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create exhibit: {str(e)}")
+
+@app.get("/exhibits")
+async def get_exhibits():
+    """Get all exhibits"""
+    try:
+        exhibits = get_all_exhibits()
+        return {"exhibits": exhibits}
+    except Exception as e:
+        logger.error(f"Error fetching exhibits: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exhibits: {str(e)}")
+
+@app.get("/exhibits/{exhibit_id}")
+async def get_exhibit(exhibit_id: int):
+    """Get a specific exhibit by ID"""
+    try:
+        exhibit = get_exhibit_by_id(exhibit_id)
+        if not exhibit:
+            raise HTTPException(status_code=404, detail="Exhibit not found")
+        return exhibit
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exhibit: {str(e)}")
+
+@app.put("/exhibits/{exhibit_id}")
+async def update_exhibit_endpoint(exhibit_id: int, updates: ExhibitUpdate):
+    """Update an existing exhibit"""
+    try:
+        updated_exhibit = update_exhibit(exhibit_id, updates)
+        if not updated_exhibit:
+            raise HTTPException(status_code=404, detail="Exhibit not found")
+        return updated_exhibit
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update exhibit: {str(e)}")
+
+@app.delete("/exhibits/{exhibit_id}")
+async def delete_exhibit_endpoint(exhibit_id: int):
+    """Delete an exhibit"""
+    try:
+        deleted = delete_exhibit(exhibit_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Exhibit not found")
+        return {"message": "Exhibit deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete exhibit: {str(e)}")
+
+@app.get("/sensors/data")
+async def get_sensor_data():
+    if MOCK_SENSORS:
+        data = generate_mock_sensor_data()
+    else:
+        # TODO: Implement real sensor data collection
+        data = generate_mock_sensor_data()
+    
+    return data
+
+@app.post("/anomaly/check")
+async def check_anomaly(request: AnomalyCheck):
+    try:
+        # Get exhibit-specific thresholds if exhibit_id is provided
+        thresholds = None
+        if request.exhibit_id:
+            exhibit = get_exhibit_by_id(request.exhibit_id)
+            if exhibit:
+                thresholds = {
+                    "temperature": {"min": exhibit.temperature_min, "max": exhibit.temperature_max},
+                    "humidity": {"min": exhibit.humidity_min, "max": exhibit.humidity_max},
+                    "vibration": {"min": 0.0, "max": exhibit.vibration_max}
+                }
+                # Save sensor reading
+                save_sensor_reading(request.exhibit_id, request.sensor_data)
+        
+        if thresholds is None:
+            thresholds = request.threshold_config or DEFAULT_THRESHOLDS
+        
+        # Rule-based detection
+        result = detect_anomaly_rule_based(request.sensor_data, thresholds)
+        
+        # Generate explanation
+        explanation = generate_anomaly_explanation(result["anomalies"], request.sensor_data)
+        
+        # Save anomaly if detected
+        if result["is_anomaly"] and request.exhibit_id:
+            save_anomaly(
+                request.exhibit_id,
+                ",".join(result["anomalies"]),
+                result["anomaly_score"],
+                explanation,
+                json.dumps(request.sensor_data.dict())
+            )
+        
+        return AnomalyResponse(
+            is_anomaly=result["is_anomaly"],
+            anomaly_score=result["anomaly_score"],
+            explanation=explanation,
+            affected_sensors=result["affected_sensors"],
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in anomaly detection: {e}")
+        raise HTTPException(status_code=500, detail=f"Anomaly detection failed: {str(e)}")
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatMessage):
+    try:
+        response_text = generate_chat_response(request.message, request.context)
+        
+        return ChatResponse(
+            response=response_text,
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in chat processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
 
 @app.get("/camera/stream")
 async def camera_stream():
-    media_type = "multipart/x-mixed-replace; boundary=frame"
-    return StreamingResponse(proxy_mjpeg_stream(), media_type=media_type)
+    async def generate_stream():
+        placeholder_img = create_placeholder_image()
+        
+        while True:
+            # Create MJPEG frame
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + 
+                   placeholder_img + b'\r\n')
+            await asyncio.sleep(0.1)  # 10 FPS
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
-@app.post("/chat")
-async def chat_with_llama(req: ChatRequest):
-    if not req.question.strip():
-        raise HTTPException(status_code=400, detail="Please provide a question.")
+@app.post("/vision/check")
+async def vision_check():
+    # Placeholder for YOLOv8 integration
+    return {
+        "objects_detected": [],
+        "threat_level": "low",
+        "message": "Vision detection not implemented yet",
+        "timestamp": datetime.now().isoformat()
+    }
 
-    messages = [
-        {"role": "system", "content": "You are a helpful AI assistant for museum operations."},
-        {"role": "user", "content": req.question}
-    ]
-
-    try:
-        reply = await call_openrouter_llama(messages)
-        if reply:
-            return {"reply": reply}
-        else:
-            print("OpenRouter returned None")
-            return {"reply": "AI temporarily unavailable"}
-    except Exception as e:
-        print(f"OpenRouter exception: {e}")
-        return {"reply": "AI temporarily unavailable"}
-
-
-@app.post("/anomaly/check")
-async def check_anomaly_with_llama(req: AnomalyRequest):
-    sensors = req.sensors or generate_mock_sensors()
-    rule_eval = basic_anomaly_rules(sensors)
-    return {"sensors": sensors.model_dump(), "rule_based": rule_eval, "timestamp": now_iso()}
-
-@app.post("/vision/check", response_model=VisionResponse)
-async def check_vision_anomaly(file: UploadFile = File(...)):
-    if not yolo_model:
-        raise HTTPException(status_code=503, detail="YOLO model not loaded")
-    contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert('RGB')
-    results = yolo_model(image)
-    detections = process_yolo_detections(results)
-    anomaly = detect_vision_anomaly(detections)
-    status_msg = "⚠️ Anomaly Detected" if anomaly else "✅ Normal"
-    return VisionResponse(detections=detections, anomaly_detected=anomaly, status=status_msg)
-
-# ---------------------- ENTRY POINT ----------------------
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
