@@ -1,46 +1,36 @@
-# FastAPI and server dependencies
+# Core FastAPI dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 
-# HTTP client for external requests
+# HTTP client for ESP32 communication
 httpx==0.25.2
 
-# Data validation and serialization
-pydantic==2.5.0
+# Database
+sqlite3  # Built-in with Python
 
-# Image processing
+# Image processing and camera
 Pillow==10.1.0
+opencv-python==4.8.1.78
+
+# Data validation
+pydantic==2.5.0
 
 # Environment variables
 python-dotenv==1.0.0
 
-# Database support (SQLite is built into Python)
-# For PostgreSQL: uncomment the next line
-# psycopg2-binary==2.9.7
+# Logging and utilities
+python-json-logger==2.0.7
 
-# For MySQL: uncomment the next line  
-# PyMySQL==1.1.0
-
-# Optional: Database migrations
-# alembic==1.12.1
-
-# Optional: ORM support
-# sqlalchemy==2.0.23
-
-# Optional: Machine Learning dependencies for advanced anomaly detection
+# Optional: For advanced image processing or computer vision
 # numpy==1.24.3
-# scipy==1.11.4
-# scikit-learn==1.3.2
+# scikit-image==0.21.0
 
-# Optional: Computer Vision for YOLOv8 integration
+# Optional: For YOLOv8 integration (uncomment if needed)
 # ultralytics==8.0.196
-# opencv-python==4.8.1.78
-# torch>=1.13.0
-# torchvision>=0.14.0
+# torch==2.1.0
+# torchvision==0.16.0
 
-# Optional: Time series analysis
-# pandas==2.1.3
-
-# Optional: Advanced ML models
-# transformers==4.35.2
+# Optional: For more advanced AI chat features
+# openai==1.3.5
+# langchain==0.0.332

@@ -16,6 +16,8 @@ from PIL import Image
 import sqlite3
 import logging
 from contextlib import contextmanager
+import cv2
+import threading
 
 app = FastAPI(title="Museum Anomaly Detection API", version="1.0.0")
 
@@ -37,6 +39,16 @@ MOCK_SENSORS = os.getenv("MOCK_SENSORS", "true").lower() == "true"
 ESP32_CAM_URL = os.getenv("ESP32_CAM_URL")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 DATABASE_URL = os.getenv("DATABASE_URL", "museum.db")
+
+# NEW: ESP32 Real Sensor Configuration
+ESP32_IP = os.getenv("ESP32_IP", "10.174.95.69")
+ESP32_PORT = int(os.getenv("ESP32_PORT", "80"))
+REAL_DATA_EXHIBIT_ID = int(os.getenv("REAL_DATA_EXHIBIT_ID", "1"))
+
+# NEW: USB Camera Configuration
+USB_CAMERA_INDEX = int(os.getenv("USB_CAMERA_INDEX", "0"))
+CAMERA_QUALITY = int(os.getenv("CAMERA_QUALITY", "70"))
+CAMERA_FPS = int(os.getenv("CAMERA_FPS", "10"))
 
 # Data models
 class SensorData(BaseModel):
@@ -87,6 +99,133 @@ class AnomalyResponse(BaseModel):
     explanation: str
     affected_sensors: list
     timestamp: str
+
+# NEW: ESP32 Sensor Manager
+class ESP32SensorManager:
+    def __init__(self, ip: str, port: int):
+        self.ip = ip
+        self.port = port
+        self.base_url = f"http://{ip}:{port}"
+        self.last_successful_read = None
+        self.connection_errors = 0
+        self.max_connection_errors = 5
+        
+    async def get_sensor_data(self) -> Optional[SensorData]:
+        """Get real sensor data from ESP32"""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                # Try the recommended /api/sensors endpoint first
+                response = await client.get(f"{self.base_url}/api/sensors")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.info(f"ESP32 sensor data: {data}")
+                    
+                    # Map the ESP32 data structure to our SensorData model
+                    sensor_data = SensorData(
+                        temperature=float(data.get('temperature', 0.0)),
+                        humidity=float(data.get('humidity', 0.0)),
+                        vibration=float(data.get('vibration_value', 0.0)),
+                        timestamp=datetime.now().isoformat()
+                    )
+                    
+                    self.connection_errors = 0
+                    self.last_successful_read = datetime.now()
+                    return sensor_data
+                else:
+                    logger.warning(f"ESP32 responded with status {response.status_code}")
+                    
+        except Exception as e:
+            self.connection_errors += 1
+            logger.error(f"Error reading ESP32 data (attempt {self.connection_errors}): {e}")
+            
+            if self.connection_errors >= self.max_connection_errors:
+                logger.error(f"Max connection errors reached for ESP32. Falling back to mock data.")
+        
+        return None
+    
+    async def get_full_esp32_data(self) -> Optional[Dict]:
+        """Get comprehensive data from ESP32 /json endpoint"""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{self.base_url}/json")
+                
+                if response.status_code == 200:
+                    return response.json()
+                    
+        except Exception as e:
+            logger.error(f"Error reading ESP32 full data: {e}")
+        
+        return None
+    
+    def is_connected(self) -> bool:
+        """Check if ESP32 connection is healthy"""
+        if self.last_successful_read is None:
+            return False
+        
+        # Consider connection stale if no successful read in last 30 seconds
+        time_since_last_read = datetime.now() - self.last_successful_read
+        return time_since_last_read.total_seconds() < 30
+
+# NEW: USB Camera Manager
+class USBCameraManager:
+    def __init__(self, camera_index: int = 0):
+        self.camera_index = camera_index
+        self.cap = None
+        self.is_running = False
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        
+    def start_camera(self):
+        """Initialize and start USB camera"""
+        try:
+            self.cap = cv2.VideoCapture(self.camera_index)
+            if not self.cap.isOpened():
+                logger.error(f"Failed to open USB camera at index {self.camera_index}")
+                return False
+            
+            # Set camera properties
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+            
+            self.is_running = True
+            logger.info(f"USB camera initialized successfully at index {self.camera_index}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing USB camera: {e}")
+            return False
+    
+    def capture_frame(self) -> Optional[bytes]:
+        """Capture a single frame from USB camera"""
+        if not self.cap or not self.cap.isOpened():
+            return None
+        
+        try:
+            ret, frame = self.cap.read()
+            if ret:
+                # Encode frame to JPEG
+                _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, CAMERA_QUALITY])
+                return buffer.tobytes()
+            else:
+                logger.warning("Failed to capture frame from USB camera")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error capturing frame: {e}")
+            return None
+    
+    def stop_camera(self):
+        """Stop and release USB camera"""
+        self.is_running = False
+        if self.cap:
+            self.cap.release()
+            logger.info("USB camera released")
+
+# Global instances
+esp32_sensor_manager = ESP32SensorManager(ESP32_IP, ESP32_PORT)
+usb_camera_manager = USBCameraManager(USB_CAMERA_INDEX)
 
 # Database setup
 @contextmanager
@@ -153,13 +292,18 @@ def init_database():
 @app.on_event("startup")
 async def startup_event():
     init_database()
+    
+    # Initialize USB camera if not using mock sensors
+    if not MOCK_SENSORS:
+        usb_camera_manager.start_camera()
+    
     # Add some sample exhibits if none exist
     with get_db() as conn:
         cursor = conn.execute("SELECT COUNT(*) as count FROM exhibits")
         count = cursor.fetchone()['count']
         if count == 0:
             sample_exhibits = [
-                ("Ancient Vase", "2000-year-old ceramic vase from Roman period", "Gallery A", 20.0, 22.0, 45.0, 55.0, 0.3),
+                ("Ancient Vase (Real Sensors)", "2000-year-old ceramic vase with real ESP32 monitoring", "Gallery A", 20.0, 30.0, 40.0, 65.0, 100.0),
                 ("Medieval Manuscript", "Illuminated manuscript from 13th century", "Gallery B", 18.0, 21.0, 40.0, 50.0, 0.2),
                 ("Oil Painting", "Renaissance oil painting", "Gallery C", 19.0, 23.0, 45.0, 60.0, 0.4)
             ]
@@ -172,7 +316,12 @@ async def startup_event():
             conn.commit()
             logger.info("Sample exhibits added to database")
 
-# Database functions
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    usb_camera_manager.stop_camera()
+
+# Database functions (keeping all existing functions)
 def create_exhibit(exhibit: Exhibit) -> Exhibit:
     """Create a new exhibit in the database"""
     with get_db() as conn:
@@ -433,11 +582,17 @@ def create_placeholder_image():
 # API Endpoints
 @app.get("/health")
 async def health_check():
+    esp32_status = esp32_sensor_manager.is_connected() if not MOCK_SENSORS else "mock_mode"
+    camera_status = usb_camera_manager.is_running if not MOCK_SENSORS else "mock_mode"
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "mock_mode": MOCK_SENSORS,
-        "database": "connected"
+        "database": "connected",
+        "esp32_connected": esp32_status,
+        "camera_status": camera_status,
+        "esp32_ip": ESP32_IP if not MOCK_SENSORS else None
     }
 
 # Exhibit management endpoints
@@ -505,13 +660,55 @@ async def delete_exhibit_endpoint(exhibit_id: int):
 
 @app.get("/sensors/data")
 async def get_sensor_data():
+    """Get sensor data - either from ESP32 or mock data"""
     if MOCK_SENSORS:
         data = generate_mock_sensor_data()
     else:
-        # TODO: Implement real sensor data collection
-        data = generate_mock_sensor_data()
+        # Try to get real data from ESP32
+        real_data = await esp32_sensor_manager.get_sensor_data()
+        if real_data:
+            data = real_data
+        else:
+            # Fallback to mock data if ESP32 is not available
+            logger.warning("ESP32 not available, falling back to mock data")
+            data = generate_mock_sensor_data()
     
     return data
+
+# NEW: ESP32 specific endpoints
+@app.get("/esp32/status")
+async def esp32_status():
+    """Get ESP32 connection status and device info"""
+    if MOCK_SENSORS:
+        return {"status": "mock_mode", "message": "ESP32 integration disabled (mock mode)"}
+    
+    full_data = await esp32_sensor_manager.get_full_esp32_data()
+    if full_data:
+        return {
+            "status": "connected",
+            "device_info": full_data.get("device_info", {}),
+            "system_status": full_data.get("system_status", {}),
+            "connection_errors": esp32_sensor_manager.connection_errors,
+            "last_successful_read": esp32_sensor_manager.last_successful_read.isoformat() if esp32_sensor_manager.last_successful_read else None
+        }
+    else:
+        return {
+            "status": "disconnected",
+            "connection_errors": esp32_sensor_manager.connection_errors,
+            "message": "Unable to connect to ESP32"
+        }
+
+@app.get("/esp32/full-data")
+async def esp32_full_data():
+    """Get comprehensive data from ESP32 including history"""
+    if MOCK_SENSORS:
+        raise HTTPException(status_code=400, detail="ESP32 integration disabled (mock mode)")
+    
+    full_data = await esp32_sensor_manager.get_full_esp32_data()
+    if full_data:
+        return full_data
+    else:
+        raise HTTPException(status_code=503, detail="Unable to connect to ESP32")
 
 @app.post("/anomaly/check")
 async def check_anomaly(request: AnomalyCheck):
@@ -576,20 +773,62 @@ async def chat_endpoint(request: ChatMessage):
 
 @app.get("/camera/stream")
 async def camera_stream():
+    """Stream video from USB camera or placeholder"""
     async def generate_stream():
-        placeholder_img = create_placeholder_image()
-        
-        while True:
-            # Create MJPEG frame
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + 
-                   placeholder_img + b'\r\n')
-            await asyncio.sleep(0.1)  # 10 FPS
+        if MOCK_SENSORS:
+            # Mock mode - return placeholder image
+            placeholder_img = create_placeholder_image()
+            while True:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + 
+                       placeholder_img + b'\r\n')
+                await asyncio.sleep(1.0 / CAMERA_FPS)
+        else:
+            # Real camera mode
+            while True:
+                frame = usb_camera_manager.capture_frame()
+                if frame:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + 
+                           frame + b'\r\n')
+                else:
+                    # Fallback to placeholder if camera fails
+                    placeholder_img = create_placeholder_image()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + 
+                           placeholder_img + b'\r\n')
+                
+                await asyncio.sleep(1.0 / CAMERA_FPS)
     
     return StreamingResponse(
         generate_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+@app.get("/camera/snapshot")
+async def camera_snapshot():
+    """Take a single snapshot from USB camera"""
+    if MOCK_SENSORS:
+        # Return placeholder image
+        placeholder_img = create_placeholder_image()
+        return StreamingResponse(
+            io.BytesIO(placeholder_img),
+            media_type="image/jpeg"
+        )
+    else:
+        frame = usb_camera_manager.capture_frame()
+        if frame:
+            return StreamingResponse(
+                io.BytesIO(frame),
+                media_type="image/jpeg"
+            )
+        else:
+            # Fallback to placeholder
+            placeholder_img = create_placeholder_image()
+            return StreamingResponse(
+                io.BytesIO(placeholder_img),
+                media_type="image/jpeg"
+            )
 
 @app.post("/vision/check")
 async def vision_check():
@@ -600,6 +839,104 @@ async def vision_check():
         "message": "Vision detection not implemented yet",
         "timestamp": datetime.now().isoformat()
     }
+
+# NEW: Real-time monitoring endpoint for specific exhibit
+@app.get("/exhibits/{exhibit_id}/monitor")
+async def monitor_exhibit_realtime(exhibit_id: int):
+    """Get real-time monitoring data for a specific exhibit"""
+    try:
+        exhibit = get_exhibit_by_id(exhibit_id)
+        if not exhibit:
+            raise HTTPException(status_code=404, detail="Exhibit not found")
+        
+        # Get sensor data based on whether this is the real sensor exhibit
+        if not MOCK_SENSORS and exhibit_id == REAL_DATA_EXHIBIT_ID:
+            sensor_data = await esp32_sensor_manager.get_sensor_data()
+            if not sensor_data:
+                sensor_data = generate_mock_sensor_data()
+                logger.warning(f"ESP32 unavailable for exhibit {exhibit_id}, using mock data")
+        else:
+            sensor_data = generate_mock_sensor_data()
+        
+        # Check for anomalies using exhibit-specific thresholds
+        thresholds = {
+            "temperature": {"min": exhibit.temperature_min, "max": exhibit.temperature_max},
+            "humidity": {"min": exhibit.humidity_min, "max": exhibit.humidity_max},
+            "vibration": {"min": 0.0, "max": exhibit.vibration_max}
+        }
+        
+        anomaly_result = detect_anomaly_rule_based(sensor_data, thresholds)
+        explanation = generate_anomaly_explanation(anomaly_result["anomalies"], sensor_data)
+        
+        # Save reading and anomaly if needed
+        save_sensor_reading(exhibit_id, sensor_data)
+        if anomaly_result["is_anomaly"]:
+            save_anomaly(
+                exhibit_id,
+                ",".join(anomaly_result["anomalies"]),
+                anomaly_result["anomaly_score"],
+                explanation,
+                json.dumps(sensor_data.dict())
+            )
+        
+        return {
+            "exhibit": exhibit,
+            "sensor_data": sensor_data,
+            "anomaly_status": {
+                "is_anomaly": anomaly_result["is_anomaly"],
+                "anomaly_score": anomaly_result["anomaly_score"],
+                "explanation": explanation,
+                "affected_sensors": anomaly_result["affected_sensors"]
+            },
+            "thresholds": thresholds,
+            "data_source": "esp32" if (not MOCK_SENSORS and exhibit_id == REAL_DATA_EXHIBIT_ID) else "mock",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error monitoring exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to monitor exhibit: {str(e)}")
+
+# NEW: Historical data endpoint
+@app.get("/exhibits/{exhibit_id}/history")
+async def get_exhibit_history(exhibit_id: int, limit: int = 100):
+    """Get historical sensor readings for an exhibit"""
+    try:
+        exhibit = get_exhibit_by_id(exhibit_id)
+        if not exhibit:
+            raise HTTPException(status_code=404, detail="Exhibit not found")
+        
+        with get_db() as conn:
+            cursor = conn.execute('''
+                SELECT temperature, humidity, vibration, timestamp
+                FROM sensor_readings 
+                WHERE exhibit_id = ? 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (exhibit_id, limit))
+            
+            readings = []
+            for row in cursor.fetchall():
+                readings.append({
+                    "temperature": row['temperature'],
+                    "humidity": row['humidity'],
+                    "vibration": row['vibration'],
+                    "timestamp": row['timestamp']
+                })
+        
+        return {
+            "exhibit_id": exhibit_id,
+            "readings": readings,
+            "count": len(readings)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching history for exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exhibit history: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
