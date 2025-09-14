@@ -449,8 +449,6 @@ const ExhibitManagement = () => {
                 <Button
                   onClick={handleAddExhibit}
                   variant="default"
-                  iconName="Plus"
-                  iconPosition="left"
                   className="flex items-center"
                 >
                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -475,6 +473,31 @@ const ExhibitManagement = () => {
                   <p className="text-red-600 text-xs mt-2">
                     Make sure your backend server is running on {API_BASE_URL}
                   </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* System Overview - Moved above exhibits */}
+          {exhibits.length > 0 && (
+            <div className="mb-8 bg-white rounded-lg border border-gray-200 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">System Overview</h3>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-blue-600">{exhibits.length}</div>
+                  <div className="text-sm text-gray-600">Total Exhibits</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-green-600">{exhibits.length}</div>
+                  <div className="text-sm text-gray-600">Active Exhibits</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-orange-600">0</div>
+                  <div className="text-sm text-gray-600">Maintenance</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-red-600">0</div>
+                  <div className="text-sm text-gray-600">Offline</div>
                 </div>
               </div>
             </div>
@@ -592,31 +615,6 @@ const ExhibitManagement = () => {
                   </div>
                 </div>
               ))}
-            </div>
-          )}
-
-          {/* Summary Stats */}
-          {exhibits.length > 0 && (
-            <div className="mt-8 bg-white rounded-lg border border-gray-200 p-6">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">System Overview</h3>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-blue-600">{exhibits.length}</div>
-                  <div className="text-sm text-gray-600">Total Exhibits</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-green-600">{exhibits.length}</div>
-                  <div className="text-sm text-gray-600">Active Exhibits</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-orange-600">0</div>
-                  <div className="text-sm text-gray-600">Maintenance</div>
-                </div>
-                <div className="text-center">
-                  <div className="text-2xl font-bold text-red-600">0</div>
-                  <div className="text-sm text-gray-600">Offline</div>
-                </div>
-              </div>
             </div>
           )}
         </div>
