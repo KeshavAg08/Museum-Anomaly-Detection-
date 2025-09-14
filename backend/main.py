@@ -569,6 +569,177 @@ async def get_exhibit(exhibit_id: int):
         logger.error(f"Error fetching exhibit {exhibit_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch exhibit: {str(e)}")
 
+@app.post("/exhibits")
+async def create_exhibit(exhibit: Exhibit):
+    """Create a new exhibit"""
+    try:
+        with get_db() as conn:
+            cursor = conn.execute('''
+                INSERT INTO exhibits (name, description, location, 
+                                    temperature_min, temperature_max, 
+                                    humidity_min, humidity_max, vibration_max)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                exhibit.name, exhibit.description, exhibit.location,
+                exhibit.temperature_min, exhibit.temperature_max,
+                exhibit.humidity_min, exhibit.humidity_max, exhibit.vibration_max
+            ))
+            conn.commit()
+            
+            # Get the created exhibit
+            exhibit_id = cursor.lastrowid
+            cursor = conn.execute('''
+                SELECT id, name, description, location, 
+                       temperature_min, temperature_max, 
+                       humidity_min, humidity_max, vibration_max,
+                       created_at, updated_at 
+                FROM exhibits WHERE id = ?
+            ''', (exhibit_id,))
+            row = cursor.fetchone()
+            
+            created_exhibit = {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "location": row["location"],
+                "temperature_min": row["temperature_min"],
+                "temperature_max": row["temperature_max"],
+                "humidity_min": row["humidity_min"],
+                "humidity_max": row["humidity_max"],
+                "vibration_max": row["vibration_max"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+            
+            logger.info(f"Created exhibit: {created_exhibit}")
+            return created_exhibit
+    except Exception as e:
+        logger.error(f"Error creating exhibit: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create exhibit: {str(e)}")
+
+@app.put("/exhibits/{exhibit_id}")
+async def update_exhibit(exhibit_id: int, exhibit_update: ExhibitUpdate):
+    """Update an existing exhibit"""
+    try:
+        with get_db() as conn:
+            # Check if exhibit exists
+            cursor = conn.execute("SELECT id FROM exhibits WHERE id = ?", (exhibit_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Exhibit not found")
+            
+            # Build update query dynamically based on provided fields
+            update_fields = []
+            update_values = []
+            
+            if exhibit_update.name is not None:
+                update_fields.append("name = ?")
+                update_values.append(exhibit_update.name)
+            
+            if exhibit_update.description is not None:
+                update_fields.append("description = ?")
+                update_values.append(exhibit_update.description)
+                
+            if exhibit_update.location is not None:
+                update_fields.append("location = ?")
+                update_values.append(exhibit_update.location)
+                
+            if exhibit_update.temperature_min is not None:
+                update_fields.append("temperature_min = ?")
+                update_values.append(exhibit_update.temperature_min)
+                
+            if exhibit_update.temperature_max is not None:
+                update_fields.append("temperature_max = ?")
+                update_values.append(exhibit_update.temperature_max)
+                
+            if exhibit_update.humidity_min is not None:
+                update_fields.append("humidity_min = ?")
+                update_values.append(exhibit_update.humidity_min)
+                
+            if exhibit_update.humidity_max is not None:
+                update_fields.append("humidity_max = ?")
+                update_values.append(exhibit_update.humidity_max)
+                
+            if exhibit_update.vibration_max is not None:
+                update_fields.append("vibration_max = ?")
+                update_values.append(exhibit_update.vibration_max)
+            
+            if not update_fields:
+                raise HTTPException(status_code=400, detail="No fields provided for update")
+            
+            # Add updated_at timestamp
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            
+            # Execute update
+            update_query = f"UPDATE exhibits SET {', '.join(update_fields)} WHERE id = ?"
+            update_values.append(exhibit_id)
+            
+            conn.execute(update_query, update_values)
+            conn.commit()
+            
+            # Return updated exhibit
+            cursor = conn.execute('''
+                SELECT id, name, description, location, 
+                       temperature_min, temperature_max, 
+                       humidity_min, humidity_max, vibration_max,
+                       created_at, updated_at 
+                FROM exhibits WHERE id = ?
+            ''', (exhibit_id,))
+            row = cursor.fetchone()
+            
+            updated_exhibit = {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "location": row["location"],
+                "temperature_min": row["temperature_min"],
+                "temperature_max": row["temperature_max"],
+                "humidity_min": row["humidity_min"],
+                "humidity_max": row["humidity_max"],
+                "vibration_max": row["vibration_max"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+            
+            logger.info(f"Updated exhibit {exhibit_id}: {updated_exhibit}")
+            return updated_exhibit
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update exhibit: {str(e)}")
+
+@app.delete("/exhibits/{exhibit_id}")
+async def delete_exhibit(exhibit_id: int):
+    """Delete an exhibit"""
+    try:
+        with get_db() as conn:
+            # Check if exhibit exists
+            cursor = conn.execute("SELECT id, name FROM exhibits WHERE id = ?", (exhibit_id,))
+            exhibit = cursor.fetchone()
+            if not exhibit:
+                raise HTTPException(status_code=404, detail="Exhibit not found")
+            
+            # Delete related sensor readings first (to maintain referential integrity)
+            cursor = conn.execute("DELETE FROM sensor_readings WHERE exhibit_id = ?", (exhibit_id,))
+            deleted_readings = cursor.rowcount
+            
+            # Delete the exhibit
+            cursor = conn.execute("DELETE FROM exhibits WHERE id = ?", (exhibit_id,))
+            conn.commit()
+            
+            logger.info(f"Deleted exhibit {exhibit_id}: {exhibit['name']} (and {deleted_readings} sensor readings)")
+            return {
+                "message": f"Exhibit '{exhibit['name']}' deleted successfully",
+                "deleted_sensor_readings": deleted_readings
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete exhibit: {str(e)}")
+
 @app.get("/exhibits/{exhibit_id}/monitor")
 async def monitor_exhibit_realtime(exhibit_id: int):
     """Get real-time monitoring data for a specific exhibit"""
@@ -695,54 +866,6 @@ async def camera_stream_for_exhibit(exhibit_id: int):
             generate_placeholder_stream(exhibit_name),
             media_type="multipart/x-mixed-replace; boundary=frame"
         )
-
-@app.post("/exhibits")
-async def create_exhibit(exhibit: Exhibit):
-    """Create a new exhibit"""
-    try:
-        with get_db() as conn:
-            cursor = conn.execute('''
-                INSERT INTO exhibits (name, description, location, 
-                                    temperature_min, temperature_max, 
-                                    humidity_min, humidity_max, vibration_max)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                exhibit.name, exhibit.description, exhibit.location,
-                exhibit.temperature_min, exhibit.temperature_max,
-                exhibit.humidity_min, exhibit.humidity_max, exhibit.vibration_max
-            ))
-            conn.commit()
-            
-            # Get the created exhibit
-            exhibit_id = cursor.lastrowid
-            cursor = conn.execute('''
-                SELECT id, name, description, location, 
-                       temperature_min, temperature_max, 
-                       humidity_min, humidity_max, vibration_max,
-                       created_at, updated_at 
-                FROM exhibits WHERE id = ?
-            ''', (exhibit_id,))
-            row = cursor.fetchone()
-            
-            created_exhibit = {
-                "id": row["id"],
-                "name": row["name"],
-                "description": row["description"],
-                "location": row["location"],
-                "temperature_min": row["temperature_min"],
-                "temperature_max": row["temperature_max"],
-                "humidity_min": row["humidity_min"],
-                "humidity_max": row["humidity_max"],
-                "vibration_max": row["vibration_max"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"]
-            }
-            
-            logger.info(f"Created exhibit: {created_exhibit}")
-            return created_exhibit
-    except Exception as e:
-        logger.error(f"Error creating exhibit: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create exhibit: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
