@@ -17,11 +17,29 @@ import sqlite3
 import logging
 from contextlib import contextmanager
 
-app = FastAPI(title="Museum Anomaly Detection API", version="1.0.0")
+# Try to import OpenCV, but make it optional
+try:
+    import cv2
+    import threading
+    from queue import Queue
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("Warning: OpenCV not available. Camera features will use placeholders only.")
+
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("Warning: python-dotenv not installed. Using default environment variables.")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Create FastAPI app
+app = FastAPI(title="Museum Anomaly Detection API", version="1.0.0")
 
 # CORS middleware
 app.add_middleware(
@@ -32,15 +50,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load environment variables
-from dotenv import load_dotenv
-load_dotenv()
-
 # Configuration
 MOCK_SENSORS = os.getenv("MOCK_SENSORS", "true").lower() == "true"
 ESP32_IP = os.getenv("ESP32_IP", "10.174.95.69")
 ESP32_PORT = int(os.getenv("ESP32_PORT", "80"))
 REAL_DATA_EXHIBIT_ID = int(os.getenv("REAL_DATA_EXHIBIT_ID", "1"))
+USB_CAMERA_INDEX = int(os.getenv("USB_CAMERA_INDEX", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL", "museum.db")
 
 # Data models
@@ -146,8 +161,81 @@ class ESP32SensorManager:
         
         return None
 
-# Global instance
+# Global ESP32 manager instance
 esp32_sensor_manager = ESP32SensorManager(ESP32_IP, ESP32_PORT)
+
+# Camera Manager (only if OpenCV is available)
+class CameraManager:
+    def __init__(self):
+        self.camera = None
+        self.is_camera_available = False
+        self.latest_frame = None
+        self.frame_lock = None
+        self.capture_thread = None
+        
+        if CV2_AVAILABLE:
+            self.frame_lock = threading.Lock()
+            self.initialize_camera()
+        else:
+            logger.warning("OpenCV not available, camera features disabled")
+        
+    def initialize_camera(self):
+        """Initialize USB camera"""
+        if not CV2_AVAILABLE:
+            return
+            
+        try:
+            self.camera = cv2.VideoCapture(USB_CAMERA_INDEX)
+            if self.camera.isOpened():
+                # Set camera properties for better performance
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+                self.is_camera_available = True
+                logger.info(f"USB Camera initialized successfully on index {USB_CAMERA_INDEX}")
+                
+                # Start background thread to continuously capture frames
+                self.capture_thread = threading.Thread(target=self._capture_frames, daemon=True)
+                self.capture_thread.start()
+            else:
+                logger.warning("USB Camera not available")
+                self.is_camera_available = False
+        except Exception as e:
+            logger.error(f"Error initializing camera: {e}")
+            self.is_camera_available = False
+    
+    def _capture_frames(self):
+        """Background thread to capture frames continuously"""
+        if not CV2_AVAILABLE:
+            return
+            
+        while self.is_camera_available and self.camera.isOpened():
+            try:
+                ret, frame = self.camera.read()
+                if ret:
+                    with self.frame_lock:
+                        self.latest_frame = frame
+                time.sleep(1/30)  # 30 FPS
+            except Exception as e:
+                logger.error(f"Error capturing frame: {e}")
+                break
+    
+    def get_latest_frame(self):
+        """Get the latest captured frame"""
+        if not CV2_AVAILABLE or not self.frame_lock:
+            return None
+            
+        with self.frame_lock:
+            return self.latest_frame.copy() if self.latest_frame is not None else None
+    
+    def release(self):
+        """Release camera resources"""
+        self.is_camera_available = False
+        if self.camera and CV2_AVAILABLE:
+            self.camera.release()
+
+# Initialize camera manager
+camera_manager = CameraManager()
 
 # Database setup
 @contextmanager
@@ -199,6 +287,7 @@ def generate_mock_sensor_data() -> SensorData:
     base_humidity = 50.0 + random.uniform(-10, 15)
     base_vibration = random.uniform(0, 1.0)
     
+    # Occasionally generate anomalous data
     if random.random() < 0.1:
         if random.choice([True, False]):
             base_temp += random.uniform(5, 10)
@@ -297,12 +386,30 @@ def generate_chat_response(message: str, context: str = None) -> str:
         return f"I understand you're asking about: '{message}'. For museum monitoring, check temperature, humidity, and vibration levels regularly."
 
 # Create placeholder image for camera
-def create_placeholder_image():
+def create_placeholder_image_with_message(message: str):
+    """Create placeholder image with custom message"""
     img = Image.new('RGB', (640, 480), color='lightgray')
     draw = ImageDraw.Draw(img)
-    draw.text((200, 220), "Camera Placeholder", fill='black')
-    draw.text((180, 240), "(OpenCV not available)", fill='black')
-    draw.text((160, 260), "Real ESP32 data is working!", fill='green')
+    
+    # Draw message in center
+    lines = message.split('\n')
+    y_offset = 240 - (len(lines) * 10)
+    
+    for line in lines:
+        # Calculate text width to center it
+        try:
+            bbox = draw.textbbox((0, 0), line)
+            text_width = bbox[2] - bbox[0]
+        except AttributeError:
+            # Fallback for older PIL versions
+            text_width = len(line) * 6
+        x_position = (640 - text_width) // 2
+        draw.text((x_position, y_offset), line, fill='black')
+        y_offset += 25
+    
+    # Add timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    draw.text((10, 450), f"Time: {timestamp}", fill='gray')
     
     img_bytes = io.BytesIO()
     img.save(img_bytes, format='JPEG', quality=70)
@@ -310,31 +417,73 @@ def create_placeholder_image():
 
 def save_sensor_reading(exhibit_id: int, sensor_data: SensorData):
     """Save sensor reading to database"""
-    with get_db() as conn:
-        conn.execute('''
-            INSERT INTO sensor_readings (exhibit_id, temperature, humidity, vibration)
-            VALUES (?, ?, ?, ?)
-        ''', (exhibit_id, sensor_data.temperature, sensor_data.humidity, sensor_data.vibration))
-        conn.commit()
+    try:
+        with get_db() as conn:
+            conn.execute('''
+                INSERT INTO sensor_readings (exhibit_id, temperature, humidity, vibration)
+                VALUES (?, ?, ?, ?)
+            ''', (exhibit_id, sensor_data.temperature, sensor_data.humidity, sensor_data.vibration))
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error saving sensor reading: {e}")
+
+async def get_exhibit_thresholds(exhibit_id: int) -> Optional[Dict]:
+    """Get custom thresholds for an exhibit from database"""
+    try:
+        with get_db() as conn:
+            cursor = conn.execute('''
+                SELECT temperature_min, temperature_max, humidity_min, humidity_max, vibration_max
+                FROM exhibits WHERE id = ?
+            ''', (exhibit_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                return {
+                    "temperature": {"min": row["temperature_min"], "max": row["temperature_max"]},
+                    "humidity": {"min": row["humidity_min"], "max": row["humidity_max"]},
+                    "vibration": {"min": 0.0, "max": row["vibration_max"]}
+                }
+    except Exception as e:
+        logger.error(f"Error fetching exhibit thresholds: {e}")
+    
+    return None
+
+# API ENDPOINTS
 
 @app.on_event("startup")
 async def startup_event():
     init_database()
     
-    # Add sample exhibit if none exist
+    # Add sample exhibits if none exist
     with get_db() as conn:
         cursor = conn.execute("SELECT COUNT(*) as count FROM exhibits")
         count = cursor.fetchone()['count']
         if count == 0:
-            conn.execute('''
-                INSERT INTO exhibits (name, description, location, temperature_min, temperature_max, 
-                                    humidity_min, humidity_max, vibration_max)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', ("ESP32 Real Sensors", "Live data from ESP32 device", "Gallery A", 20.0, 30.0, 40.0, 65.0, 100.0))
+            # Add multiple sample exhibits
+            sample_exhibits = [
+                ("ESP32 Real Sensors", "Live data from ESP32 device", "Gallery A", 20.0, 30.0, 40.0, 65.0, 100.0),
+                ("Ancient Egyptian Artifacts", "Collection of ancient Egyptian pottery and tools", "Gallery B", 18.0, 22.0, 45.0, 55.0, 0.3),
+                ("Modern Art Collection", "Contemporary paintings and sculptures", "Gallery C", 19.0, 23.0, 40.0, 60.0, 0.4),
+                ("Natural History Display", "Fossils and geological specimens", "Gallery D", 18.0, 24.0, 42.0, 58.0, 0.5)
+            ]
+            
+            for exhibit in sample_exhibits:
+                conn.execute('''
+                    INSERT INTO exhibits (name, description, location, temperature_min, temperature_max, 
+                                        humidity_min, humidity_max, vibration_max)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', exhibit)
+            
             conn.commit()
-            logger.info("Sample exhibit added to database")
+            logger.info("Sample exhibits added to database")
 
-# API Endpoints
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup resources on shutdown"""
+    if camera_manager:
+        camera_manager.release()
+    logger.info("Application shutdown complete")
+
 @app.get("/health")
 async def health_check():
     esp32_connected = esp32_sensor_manager.last_successful_read is not None
@@ -344,150 +493,256 @@ async def health_check():
         "mock_mode": MOCK_SENSORS,
         "database": "connected",
         "esp32_connected": esp32_connected,
-        "camera_status": "placeholder_mode",
+        "camera_available": camera_manager.is_camera_available,
+        "opencv_available": CV2_AVAILABLE,
         "esp32_ip": ESP32_IP if not MOCK_SENSORS else None
     }
 
-@app.get("/sensors/data")
-async def get_sensor_data():
-    """Get sensor data - either from ESP32 or mock data"""
-    if MOCK_SENSORS:
-        data = generate_mock_sensor_data()
-    else:
-        real_data = await esp32_sensor_manager.get_sensor_data()
-        if real_data:
-            data = real_data
-        else:
-            logger.warning("ESP32 not available, falling back to mock data")
-            data = generate_mock_sensor_data()
-    
-    return data
-
-@app.get("/esp32/status")
-async def esp32_status():
-    """Get ESP32 connection status and device info"""
-    if MOCK_SENSORS:
-        return {"status": "mock_mode", "message": "ESP32 integration disabled (mock mode)"}
-    
-    full_data = await esp32_sensor_manager.get_full_esp32_data()
-    if full_data:
-        return {
-            "status": "connected",
-            "device_info": full_data.get("device_info", {}),
-            "system_status": full_data.get("system_status", {}),
-            "connection_errors": esp32_sensor_manager.connection_errors,
-            "last_successful_read": esp32_sensor_manager.last_successful_read.isoformat() if esp32_sensor_manager.last_successful_read else None
-        }
-    else:
-        return {
-            "status": "disconnected",
-            "connection_errors": esp32_sensor_manager.connection_errors,
-            "message": "Unable to connect to ESP32"
-        }
-
-@app.post("/anomaly/check")
-async def check_anomaly(request: AnomalyCheck):
+@app.get("/exhibits")
+async def get_all_exhibits():
+    """Get all exhibits"""
     try:
-        thresholds = request.threshold_config or DEFAULT_THRESHOLDS
-        
-        # Rule-based detection
-        result = detect_anomaly_rule_based(request.sensor_data, thresholds)
-        
-        # Generate explanation
-        explanation = generate_anomaly_explanation(result["anomalies"], request.sensor_data)
-        
-        # Save sensor reading if exhibit_id provided
-        if request.exhibit_id:
-            save_sensor_reading(request.exhibit_id, request.sensor_data)
-        
-        return AnomalyResponse(
-            is_anomaly=result["is_anomaly"],
-            anomaly_score=result["anomaly_score"],
-            explanation=explanation,
-            affected_sensors=result["affected_sensors"],
-            timestamp=datetime.now().isoformat()
-        )
-        
+        with get_db() as conn:
+            cursor = conn.execute('''
+                SELECT id, name, description, location, 
+                       temperature_min, temperature_max, 
+                       humidity_min, humidity_max, vibration_max,
+                       created_at, updated_at 
+                FROM exhibits ORDER BY created_at DESC
+            ''')
+            exhibits = []
+            for row in cursor.fetchall():
+                exhibit = {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "location": row["location"],
+                    "temperature_min": row["temperature_min"],
+                    "temperature_max": row["temperature_max"],
+                    "humidity_min": row["humidity_min"],
+                    "humidity_max": row["humidity_max"],
+                    "vibration_max": row["vibration_max"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"]
+                }
+                exhibits.append(exhibit)
+            
+            return {"exhibits": exhibits}
     except Exception as e:
-        logger.error(f"Error in anomaly detection: {e}")
-        raise HTTPException(status_code=500, detail=f"Anomaly detection failed: {str(e)}")
+        logger.error(f"Error fetching exhibits: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exhibits: {str(e)}")
 
-@app.post("/chat")
-async def chat_endpoint(request: ChatMessage):
+@app.get("/exhibits/{exhibit_id}")
+async def get_exhibit(exhibit_id: int):
+    """Get a specific exhibit"""
     try:
-        response_text = generate_chat_response(request.message, request.context)
-        
-        return ChatResponse(
-            response=response_text,
-            timestamp=datetime.now().isoformat()
-        )
-        
+        with get_db() as conn:
+            cursor = conn.execute('''
+                SELECT id, name, description, location, 
+                       temperature_min, temperature_max, 
+                       humidity_min, humidity_max, vibration_max,
+                       created_at, updated_at 
+                FROM exhibits WHERE id = ?
+            ''', (exhibit_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Exhibit not found")
+            
+            exhibit = {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "location": row["location"],
+                "temperature_min": row["temperature_min"],
+                "temperature_max": row["temperature_max"],
+                "humidity_min": row["humidity_min"],
+                "humidity_max": row["humidity_max"],
+                "vibration_max": row["vibration_max"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+            return exhibit
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in chat processing: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
-
-@app.get("/camera/stream")
-async def camera_stream():
-    """Placeholder camera stream"""
-    async def generate_stream():
-        placeholder_img = create_placeholder_image()
-        while True:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + 
-                   placeholder_img + b'\r\n')
-            await asyncio.sleep(0.1)
-    
-    return StreamingResponse(
-        generate_stream(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
-@app.get("/camera/snapshot")
-async def camera_snapshot():
-    """Take a placeholder snapshot"""
-    placeholder_img = create_placeholder_image()
-    return StreamingResponse(
-        io.BytesIO(placeholder_img),
-        media_type="image/jpeg"
-    )
+        logger.error(f"Error fetching exhibit {exhibit_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch exhibit: {str(e)}")
 
 @app.get("/exhibits/{exhibit_id}/monitor")
 async def monitor_exhibit_realtime(exhibit_id: int):
     """Get real-time monitoring data for a specific exhibit"""
     try:
-        # Get sensor data based on whether this is the real sensor exhibit
-        if not MOCK_SENSORS and exhibit_id == REAL_DATA_EXHIBIT_ID:
+        # Determine if this exhibit should use real ESP32 data
+        use_real_data = (exhibit_id == REAL_DATA_EXHIBIT_ID and not MOCK_SENSORS)
+        
+        if use_real_data:
+            # Try to get real ESP32 data for exhibit 1
             sensor_data = await esp32_sensor_manager.get_sensor_data()
             data_source = "esp32"
+            
             if not sensor_data:
+                # Fallback to mock if ESP32 is unavailable
                 sensor_data = generate_mock_sensor_data()
                 data_source = "mock_fallback"
                 logger.warning(f"ESP32 unavailable for exhibit {exhibit_id}, using mock data")
         else:
+            # Use mock data for all other exhibits
             sensor_data = generate_mock_sensor_data()
             data_source = "mock"
         
-        # Use default thresholds for anomaly detection
-        anomaly_result = detect_anomaly_rule_based(sensor_data, DEFAULT_THRESHOLDS)
+        # Get exhibit-specific thresholds from database
+        exhibit_thresholds = await get_exhibit_thresholds(exhibit_id)
+        
+        # Use exhibit thresholds or default
+        thresholds = exhibit_thresholds or DEFAULT_THRESHOLDS
+        
+        # Perform anomaly detection
+        anomaly_result = detect_anomaly_rule_based(sensor_data, thresholds)
         explanation = generate_anomaly_explanation(anomaly_result["anomalies"], sensor_data)
+        
+        # Save sensor reading to database
+        save_sensor_reading(exhibit_id, sensor_data)
         
         return {
             "exhibit_id": exhibit_id,
-            "sensor_data": sensor_data,
+            "sensor_data": {
+                **sensor_data.dict(),
+                "data_source": data_source,
+                "is_real_data": data_source == "esp32"
+            },
             "anomaly_status": {
                 "is_anomaly": anomaly_result["is_anomaly"],
                 "anomaly_score": anomaly_result["anomaly_score"],
                 "explanation": explanation,
                 "affected_sensors": anomaly_result["affected_sensors"]
             },
-            "thresholds": DEFAULT_THRESHOLDS,
-            "data_source": data_source,
+            "thresholds": thresholds,
+            "camera_available": camera_manager.is_camera_available if exhibit_id == REAL_DATA_EXHIBIT_ID else False,
             "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
         logger.error(f"Error monitoring exhibit {exhibit_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to monitor exhibit: {str(e)}")
+
+@app.get("/camera/stream/{exhibit_id}")
+async def camera_stream_for_exhibit(exhibit_id: int):
+    """Camera stream for specific exhibit - real camera for exhibit 1, placeholder for others"""
+    
+    async def generate_real_camera_stream():
+        """Generate real USB camera stream"""
+        while True:
+            if camera_manager.is_camera_available and CV2_AVAILABLE:
+                frame = camera_manager.get_latest_frame()
+                if frame is not None:
+                    # Encode frame as JPEG
+                    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + 
+                               frame_bytes + b'\r\n')
+                    else:
+                        # Fallback to placeholder if encoding fails
+                        placeholder_img = create_placeholder_image_with_message("Camera Error")
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + 
+                               placeholder_img + b'\r\n')
+                else:
+                    # No frame available
+                    placeholder_img = create_placeholder_image_with_message("No Signal")
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + 
+                           placeholder_img + b'\r\n')
+            else:
+                # Camera not available
+                placeholder_img = create_placeholder_image_with_message("Camera Offline")
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + 
+                       placeholder_img + b'\r\n')
+            
+            await asyncio.sleep(1/15)  # 15 FPS for streaming
+    
+    async def generate_placeholder_stream(exhibit_name="Mock Exhibit"):
+        """Generate placeholder stream for mock exhibits"""
+        while True:
+            placeholder_img = create_placeholder_image_with_message(f"{exhibit_name}\n(Mock Camera)")
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + 
+                   placeholder_img + b'\r\n')
+            await asyncio.sleep(1/5)  # 5 FPS for placeholder
+    
+    # Use real camera for exhibit 1, placeholder for others
+    if exhibit_id == REAL_DATA_EXHIBIT_ID:
+        return StreamingResponse(
+            generate_real_camera_stream(),
+            media_type="multipart/x-mixed-replace; boundary=frame"
+        )
+    else:
+        # Get exhibit name for placeholder
+        exhibit_name = f"Exhibit {exhibit_id}"
+        try:
+            with get_db() as conn:
+                cursor = conn.execute("SELECT name FROM exhibits WHERE id = ?", (exhibit_id,))
+                row = cursor.fetchone()
+                if row:
+                    exhibit_name = row["name"]
+        except Exception:
+            pass
+            
+        return StreamingResponse(
+            generate_placeholder_stream(exhibit_name),
+            media_type="multipart/x-mixed-replace; boundary=frame"
+        )
+
+@app.post("/exhibits")
+async def create_exhibit(exhibit: Exhibit):
+    """Create a new exhibit"""
+    try:
+        with get_db() as conn:
+            cursor = conn.execute('''
+                INSERT INTO exhibits (name, description, location, 
+                                    temperature_min, temperature_max, 
+                                    humidity_min, humidity_max, vibration_max)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                exhibit.name, exhibit.description, exhibit.location,
+                exhibit.temperature_min, exhibit.temperature_max,
+                exhibit.humidity_min, exhibit.humidity_max, exhibit.vibration_max
+            ))
+            conn.commit()
+            
+            # Get the created exhibit
+            exhibit_id = cursor.lastrowid
+            cursor = conn.execute('''
+                SELECT id, name, description, location, 
+                       temperature_min, temperature_max, 
+                       humidity_min, humidity_max, vibration_max,
+                       created_at, updated_at 
+                FROM exhibits WHERE id = ?
+            ''', (exhibit_id,))
+            row = cursor.fetchone()
+            
+            created_exhibit = {
+                "id": row["id"],
+                "name": row["name"],
+                "description": row["description"],
+                "location": row["location"],
+                "temperature_min": row["temperature_min"],
+                "temperature_max": row["temperature_max"],
+                "humidity_min": row["humidity_min"],
+                "humidity_max": row["humidity_max"],
+                "vibration_max": row["vibration_max"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
+            }
+            
+            logger.info(f"Created exhibit: {created_exhibit}")
+            return created_exhibit
+    except Exception as e:
+        logger.error(f"Error creating exhibit: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create exhibit: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(
